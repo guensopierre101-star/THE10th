@@ -1,0 +1,1627 @@
+<!DOCTYPE html>
+<html lang="ht">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+    <title>AI English Teacher</title>
+
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            text-align: center;
+        }
+
+        .container {
+            width: 90%;
+            max-width: 400px;
+            padding: 20px;
+        }
+
+        .avatar {
+            width: 120px;
+            height: 120px;
+            background: linear-gradient(135deg, #007BFF, #00d2ff);
+            border-radius: 50%;
+            margin: 0 auto 20px auto;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 50px;
+            box-shadow: 0 0 20px rgba(0, 123, 255, 0.5);
+            transition: transform 0.3s ease;
+        }
+
+        .avatar.active {
+            transform: scale(1.05);
+            box-shadow: 0 0 30px rgba(0, 210, 255, 0.8);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.08); }
+            100% { transform: scale(1); }
+        }
+
+        h2 {
+            margin-bottom: 5px;
+            font-size: 24px;
+        }
+
+        p {
+            color: #aaa;
+            font-size: 14px;
+            margin-bottom: 30px;
+        }
+
+        #status {
+            font-weight: 500;
+            margin: 20px 0;
+            color: #00d2ff;
+            font-size: 15px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 16px;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            border: none;
+            border-radius: 30px;
+            color: white;
+            background-color: #007BFF;
+            box-shadow: 0 4px 15px rgba(0,123,255,0.4);
+        }
+
+        .btn.stop {
+            background-color: #ff3b30;
+            box-shadow: 0 4px 15px rgba(255,59,48,0.4);
+        }
+
+        .api-box {
+            margin-bottom: 20px;
+            text-align: left;
+        }
+
+        .api-box label {
+            font-size: 12px;
+            color: #888;
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        .api-box input {
+            width: 100%;
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            background: #1e1e1e;
+            color: white;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <div class="api-box" id="configSection">
+        <label for="apiKeyInput">Gemini API Key ou:</label>
+
+        <input
+            type="password"
+            id="apiKeyInput"
+            placeholder="Mete kle API ou la..."
+            autocomplete="off"
+        >
+    </div>
+
+    <div class="avatar" id="avatarIcon">👨‍🏫</div>
+
+    <h2>English Teacher</h2>
+
+    <p>
+        Pale ak pwofesè a an tan reyèl pou amelyore nivo w.
+    </p>
+
+    <div id="status">Dekonekte</div>
+
+    <button id="mainBtn" class="btn" onclick="toggleSession()">
+        Kòmanse Konvèsasyon
+    </button>
+
+</div>
+
+
+<script>
+
+/* =========================================================
+   SESSION
+========================================================= */
+
+let isConnected = false;
+let ws = null;
+let mediaStream = null;
+
+let inputAudioContext = null;
+let playbackAudioContext = null;
+
+let audioInput = null;
+let processor = null;
+let silentGain = null;
+
+
+/* =========================================================
+   PLAYBACK ENGINE
+========================================================= */
+
+/*
+ * Nou pa sèvi ak ansyen:
+ *
+ * audioQueue + isPlaying
+ *
+ * paske li te ka kreye yon backlog.
+ *
+ * Kounye a chak audio chunk resevwa
+ * pwograme dirèkteman nan menm AudioContext la.
+ */
+
+let activeSources = new Set();
+
+let nextPlaybackTime = 0;
+
+let playbackGeneration = 0;
+
+
+/* =========================================================
+   INPUT
+========================================================= */
+
+const TARGET_INPUT_RATE = 16000;
+
+
+/* =========================================================
+   BUTTON
+========================================================= */
+
+async function toggleSession() {
+
+    if (!isConnected) {
+
+        await startSession();
+
+    } else {
+
+        stopSession();
+
+    }
+
+}
+
+
+/* =========================================================
+   START SESSION
+========================================================= */
+
+async function startSession() {
+
+    const apiKey =
+        document
+            .getElementById("apiKeyInput")
+            .value
+            .trim();
+
+
+    if (!apiKey) {
+
+        alert(
+            "Tanpri mete kle Gemini API ou a anvan w kòmanse."
+        );
+
+        return;
+
+    }
+
+
+    document
+        .getElementById("status")
+        .innerText =
+        "Ap konekte ak Gemini...";
+
+
+    try {
+
+        /* =========================================
+           MICROPHONE
+        ========================================= */
+
+        mediaStream =
+            await navigator.mediaDevices.getUserMedia({
+
+                audio: {
+
+                    channelCount: 1,
+
+                    echoCancellation: true,
+
+                    noiseSuppression: true,
+
+                    autoGainControl: true
+
+                }
+
+            });
+
+
+        /* =========================================
+           INPUT AUDIO CONTEXT
+        ========================================= */
+
+        /*
+         * Nou pa fòse browser la sou 16k.
+         *
+         * Gen telefòn/browser ki ka kreye 48k
+         * menm si nou mande 16k.
+         *
+         * Nou pran sample rate reyèl la epi
+         * resample li nan 16k anvan nou voye l.
+         */
+
+        inputAudioContext =
+            new (
+                window.AudioContext ||
+                window.webkitAudioContext
+            )();
+
+
+        /* =========================================
+           PLAYBACK AUDIO CONTEXT
+        ========================================= */
+
+        playbackAudioContext =
+            new (
+                window.AudioContext ||
+                window.webkitAudioContext
+            )();
+
+
+        await inputAudioContext.resume();
+
+        await playbackAudioContext.resume();
+
+
+        console.log(
+            "Browser input sample rate:",
+            inputAudioContext.sampleRate
+        );
+
+
+        console.log(
+            "Playback sample rate:",
+            playbackAudioContext.sampleRate
+        );
+
+
+        /* =========================================
+           WEBSOCKET
+        ========================================= */
+
+        const host =
+            "generativelanguage.googleapis.com";
+
+
+        const path =
+            "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key="
+            +
+            encodeURIComponent(apiKey);
+
+
+        ws =
+            new WebSocket(
+                "wss://" + host + path
+            );
+
+
+        /* =========================================
+           OPEN
+        ========================================= */
+
+        ws.onopen = function() {
+
+            console.log(
+                "Gemini WebSocket connected."
+            );
+
+
+            const setupMessage = {
+
+                setup: {
+
+                    model:
+                        "models/gemini-3.8-live",
+
+
+                    generationConfig: {
+
+                        responseModalities: [
+                            "AUDIO"
+                        ],
+
+
+                        speechConfig: {
+
+                            voiceConfig: {
+
+                                prebuiltVoiceConfig: {
+
+                                    voiceName: "Puck"
+
+                                }
+
+                            }
+
+                        }
+
+                    },
+
+
+                    inputAudioTranscription: {},
+
+                    outputAudioTranscription: {},
+
+
+                    systemInstruction: {
+
+                        parts: [
+
+                            {
+
+                                text:
+
+                                "You are a friendly English teacher. " +
+
+                                "Your main purpose is to help the user " +
+                                "practice English through a natural " +
+                                "real-time voice conversation. " +
+
+                                "The user is a beginner. " +
+
+                                "Speak clearly and naturally. " +
+
+                                "Use simple English. " +
+
+                                "Do not speak too fast. " +
+
+                                "When the user makes an important " +
+                                "English mistake, correct it gently " +
+                                "and briefly. " +
+
+                                "Then continue the conversation naturally. " +
+
+                                "Do not give long explanations unless " +
+                                "the user asks. " +
+
+                                "Encourage the user to speak more English."
+
+                            }
+
+                        ]
+
+                    }
+
+                }
+
+            };
+
+
+            ws.send(
+                JSON.stringify(
+                    setupMessage
+                )
+            );
+
+        };
+
+
+        /* =========================================
+           MESSAGE
+        ========================================= */
+
+        ws.onmessage =
+            async function(event) {
+
+                try {
+
+                    let text;
+
+
+                    if (
+                        event.data
+                        instanceof Blob
+                    ) {
+
+                        text =
+                            await event.data.text();
+
+                    } else {
+
+                        text =
+                            event.data;
+
+                    }
+
+
+                    const response =
+                        JSON.parse(text);
+
+
+                    /*
+                     * SETUP COMPLETE
+                     */
+
+                    if (
+                        response.setupComplete
+                    ) {
+
+                        console.log(
+                            "Gemini setup complete."
+                        );
+
+
+                        isConnected = true;
+
+
+                        updateConnectedUI();
+
+
+                        startMicrophone();
+
+                    }
+
+
+                    /*
+                     * SERVER CONTENT
+                     */
+
+                    if (
+                        response.serverContent
+                    ) {
+
+                        const server =
+                            response.serverContent;
+
+
+                        /* -------------------------
+                           USER TRANSCRIPTION
+                        ------------------------- */
+
+                        if (
+                            server.inputTranscription &&
+                            server.inputTranscription.text
+                        ) {
+
+                            console.log(
+                                "YOU:",
+                                server.inputTranscription.text
+                            );
+
+                        }
+
+
+                        /* -------------------------
+                           GEMINI TRANSCRIPTION
+                        ------------------------- */
+
+                        if (
+                            server.outputTranscription &&
+                            server.outputTranscription.text
+                        ) {
+
+                            console.log(
+                                "GEMINI:",
+                                server.outputTranscription.text
+                            );
+
+                        }
+
+
+                        /* -------------------------
+                           INTERRUPTION
+                        ------------------------- */
+
+                        if (
+                            server.interrupted
+                        ) {
+
+                            console.log(
+                                "Gemini interrupted."
+                            );
+
+
+                            /*
+                             * THIS IS IMPORTANT.
+                             *
+                             * Stop every source that
+                             * is already playing.
+                             */
+
+                            stopAllPlayback();
+
+                        }
+
+
+                        /* -------------------------
+                           AUDIO
+                        ------------------------- */
+
+                        if (
+                            server.modelTurn &&
+                            server.modelTurn.parts
+                        ) {
+
+                            for (
+                                const part
+                                of server.modelTurn.parts
+                            ) {
+
+                                if (
+                                    part.inlineData &&
+                                    part.inlineData.data
+                                ) {
+
+                                    /*
+                                     * Do NOT put it into
+                                     * an old-style queue.
+                                     *
+                                     * Schedule it directly.
+                                     */
+
+                                    scheduleAudio(
+                                        part.inlineData.data
+                                    );
+
+                                }
+
+                            }
+
+                        }
+
+                    }
+
+                }
+
+                catch (error) {
+
+                    console.error(
+                        "Receive error:",
+                        error
+                    );
+
+                }
+
+            };
+
+
+        /* =========================================
+           ERROR
+        ========================================= */
+
+        ws.onerror =
+            function(error) {
+
+                console.error(
+                    "WebSocket error:",
+                    error
+                );
+
+
+                document
+                    .getElementById("status")
+                    .innerText =
+                    "Erè nan koneksyon Gemini.";
+
+            };
+
+
+        /* =========================================
+           CLOSE
+        ========================================= */
+
+        ws.onclose =
+            function(event) {
+
+                console.log(
+                    "Gemini connection closed:",
+                    event.code,
+                    event.reason
+                );
+
+
+                cleanupSession();
+
+            };
+
+
+    }
+
+    catch (error) {
+
+        console.error(
+            "Start error:",
+            error
+        );
+
+
+        alert(
+            "Erè: " + error.message
+        );
+
+
+        cleanupSession();
+
+    }
+
+}
+
+
+/* =========================================================
+   MICROPHONE
+========================================================= */
+
+function startMicrophone() {
+
+    if (
+        !mediaStream ||
+        !inputAudioContext
+    ) {
+
+        return;
+
+    }
+
+
+    audioInput =
+        inputAudioContext
+            .createMediaStreamSource(
+                mediaStream
+            );
+
+
+    /*
+     * 2048 samples keeps latency relatively low.
+     */
+
+    processor =
+        inputAudioContext
+            .createScriptProcessor(
+                2048,
+                1,
+                1
+            );
+
+
+    processor.onaudioprocess =
+        function(event) {
+
+            if (
+                !isConnected ||
+                !ws ||
+                ws.readyState !==
+                WebSocket.OPEN
+            ) {
+
+                return;
+
+            }
+
+
+            const input =
+                event.inputBuffer
+                    .getChannelData(0);
+
+
+            /*
+             * Browser sample rate can be 48k,
+             * 44.1k, etc.
+             *
+             * Convert it to real 16k PCM.
+             */
+
+            const resampled =
+                downsampleTo16k(
+                    input,
+                    inputAudioContext.sampleRate
+                );
+
+
+            if (
+                !resampled ||
+                resampled.length === 0
+            ) {
+
+                return;
+
+            }
+
+
+            const pcm16 =
+                floatTo16BitPCM(
+                    resampled
+                );
+
+
+            const base64 =
+                arrayBufferToBase64(
+                    pcm16.buffer
+                );
+
+
+            const message = {
+
+                realtimeInput: {
+
+                    audio: {
+
+                        data: base64,
+
+                        mimeType:
+                            "audio/pcm;rate=16000"
+
+                    }
+
+                }
+
+            };
+
+
+            try {
+
+                ws.send(
+                    JSON.stringify(
+                        message
+                    )
+                );
+
+            }
+
+            catch (error) {
+
+                console.error(
+                    "Audio send error:",
+                    error
+                );
+
+            }
+
+        };
+
+
+    audioInput.connect(
+        processor
+    );
+
+
+    /*
+     * Processor bezwen konekte ak destination
+     * pou onaudioprocess kontinye travay.
+     *
+     * Gain 0 = pa voye mic la nan speaker.
+     */
+
+    silentGain =
+        inputAudioContext
+            .createGain();
+
+
+    silentGain.gain.value = 0;
+
+
+    processor.connect(
+        silentGain
+    );
+
+
+    silentGain.connect(
+        inputAudioContext.destination
+    );
+
+
+    console.log(
+        "Microphone started."
+    );
+
+}
+
+
+/* =========================================================
+   RESAMPLE TO 16 KHZ
+========================================================= */
+
+function downsampleTo16k(
+    buffer,
+    inputSampleRate
+) {
+
+    if (
+        inputSampleRate ===
+        TARGET_INPUT_RATE
+    ) {
+
+        return new Float32Array(
+            buffer
+        );
+
+    }
+
+
+    if (
+        inputSampleRate <
+        TARGET_INPUT_RATE
+    ) {
+
+        /*
+         * Browser normally won't do this,
+         * but don't create invalid audio.
+         */
+
+        return new Float32Array(
+            buffer
+        );
+
+    }
+
+
+    const ratio =
+        inputSampleRate /
+        TARGET_INPUT_RATE;
+
+
+    const newLength =
+        Math.round(
+            buffer.length /
+            ratio
+        );
+
+
+    const result =
+        new Float32Array(
+            newLength
+        );
+
+
+    let offsetResult = 0;
+
+    let offsetBuffer = 0;
+
+
+    while (
+        offsetResult <
+        result.length
+    ) {
+
+        const nextOffsetBuffer =
+            Math.round(
+                (offsetResult + 1) *
+                ratio
+            );
+
+
+        let accum = 0;
+
+        let count = 0;
+
+
+        for (
+            let i = offsetBuffer;
+            i < nextOffsetBuffer &&
+            i < buffer.length;
+            i++
+        ) {
+
+            accum += buffer[i];
+
+            count++;
+
+        }
+
+
+        result[offsetResult] =
+            count > 0
+            ? accum / count
+            : 0;
+
+
+        offsetResult++;
+
+        offsetBuffer =
+            nextOffsetBuffer;
+
+    }
+
+
+    return result;
+
+}
+
+
+/* =========================================================
+   FLOAT32 -> PCM16
+========================================================= */
+
+function floatTo16BitPCM(
+    input
+) {
+
+    const output =
+        new Int16Array(
+            input.length
+        );
+
+
+    for (
+        let i = 0;
+        i < input.length;
+        i++
+    ) {
+
+        const sample =
+            Math.max(
+                -1,
+                Math.min(
+                    1,
+                    input[i]
+                )
+            );
+
+
+        output[i] =
+            sample < 0
+            ? sample * 0x8000
+            : sample * 0x7FFF;
+
+    }
+
+
+    return output;
+
+}
+
+
+/* =========================================================
+   BASE64
+========================================================= */
+
+function arrayBufferToBase64(
+    buffer
+) {
+
+    const bytes =
+        new Uint8Array(
+            buffer
+        );
+
+
+    const chunkSize =
+        0x8000;
+
+
+    let binary = "";
+
+
+    for (
+        let i = 0;
+        i < bytes.length;
+        i += chunkSize
+    ) {
+
+        const chunk =
+            bytes.subarray(
+                i,
+                Math.min(
+                    i + chunkSize,
+                    bytes.length
+                )
+            );
+
+
+        binary +=
+            String.fromCharCode(
+                ...chunk
+            );
+
+    }
+
+
+    return btoa(binary);
+
+}
+
+
+/* =========================================================
+   AUDIO PLAYBACK
+========================================================= */
+
+function scheduleAudio(
+    base64Data
+) {
+
+    if (
+        !playbackAudioContext
+    ) {
+
+        return;
+
+    }
+
+
+    try {
+
+        const binary =
+            atob(
+                base64Data
+            );
+
+
+        const bytes =
+            new Uint8Array(
+                binary.length
+            );
+
+
+        for (
+            let i = 0;
+            i < binary.length;
+            i++
+        ) {
+
+            bytes[i] =
+                binary.charCodeAt(i);
+
+        }
+
+
+        /*
+         * Gemini output =
+         * raw 16-bit PCM, 24kHz.
+         */
+
+        const dataInt16 =
+            new Int16Array(
+                bytes.buffer
+            );
+
+
+        if (
+            dataInt16.length === 0
+        ) {
+
+            return;
+
+        }
+
+
+        const float32 =
+            new Float32Array(
+                dataInt16.length
+            );
+
+
+        for (
+            let i = 0;
+            i < dataInt16.length;
+            i++
+        ) {
+
+            float32[i] =
+                dataInt16[i] /
+                32768;
+
+        }
+
+
+        const buffer =
+            playbackAudioContext
+                .createBuffer(
+                    1,
+                    float32.length,
+                    24000
+                );
+
+
+        buffer
+            .getChannelData(0)
+            .set(float32);
+
+
+        const source =
+            playbackAudioContext
+                .createBufferSource();
+
+
+        source.buffer =
+            buffer;
+
+
+        source.connect(
+            playbackAudioContext
+                .destination
+        );
+
+
+        /*
+         * Every new chunk is scheduled
+         * immediately after the previous one.
+         *
+         * This avoids the old:
+         *
+         * "wait for chunk -> then play next"
+         *
+         * system that created lag.
+         */
+
+        const now =
+            playbackAudioContext
+                .currentTime;
+
+
+        /*
+         * Small safety buffer.
+         */
+
+        if (
+            nextPlaybackTime <
+            now + 0.03
+        ) {
+
+            nextPlaybackTime =
+                now + 0.03;
+
+        }
+
+
+        const generation =
+            playbackGeneration;
+
+
+        const startTime =
+            nextPlaybackTime;
+
+
+        nextPlaybackTime +=
+            buffer.duration;
+
+
+        activeSources.add(
+            source
+        );
+
+
+        source.onended =
+            function() {
+
+                activeSources.delete(
+                    source
+                );
+
+            };
+
+
+        /*
+         * If an interruption happened
+         * before this source started,
+         * don't play it.
+         */
+
+        if (
+            generation !==
+            playbackGeneration
+        ) {
+
+            activeSources.delete(
+                source
+            );
+
+            return;
+
+        }
+
+
+        source.start(
+            startTime
+        );
+
+
+    }
+
+    catch (error) {
+
+        console.error(
+            "Playback error:",
+            error
+        );
+
+    }
+
+}
+
+
+/* =========================================================
+   STOP ALL PLAYBACK
+========================================================= */
+
+function stopAllPlayback() {
+
+    /*
+     * Change generation first.
+     *
+     * Any chunks that were scheduled
+     * but haven't started yet become invalid.
+     */
+
+    playbackGeneration++;
+
+
+    /*
+     * STOP EVERY CURRENT AUDIO SOURCE.
+     */
+
+    for (
+        const source
+        of activeSources
+    ) {
+
+        try {
+
+            source.onended = null;
+
+            source.stop(0);
+
+        }
+
+        catch (e) {}
+
+    }
+
+
+    activeSources.clear();
+
+
+    /*
+     * Reset playback cursor.
+     */
+
+    if (
+        playbackAudioContext
+    ) {
+
+        nextPlaybackTime =
+            playbackAudioContext
+                .currentTime
+                + 0.03;
+
+    } else {
+
+        nextPlaybackTime = 0;
+
+    }
+
+}
+
+
+/* =========================================================
+   CONNECTED UI
+========================================================= */
+
+function updateConnectedUI() {
+
+    document
+        .getElementById("status")
+        .innerText =
+        "Konekte! Pwofesè a ap koute w...";
+
+
+    const button =
+        document
+            .getElementById("mainBtn");
+
+
+    button.innerText =
+        "Sispann Konvèsasyon an";
+
+
+    button.classList.add(
+        "stop"
+    );
+
+
+    document
+        .getElementById("avatarIcon")
+        .classList.add(
+            "active"
+        );
+
+
+    document
+        .getElementById("configSection")
+        .style.display =
+        "none";
+
+}
+
+
+/* =========================================================
+   STOP SESSION
+========================================================= */
+
+function stopSession() {
+
+    /*
+     * First stop audio immediately.
+     */
+
+    stopAllPlayback();
+
+
+    /*
+     * Tell Gemini the realtime audio
+     * stream has ended before closing.
+     */
+
+    if (
+        ws &&
+        ws.readyState === WebSocket.OPEN
+    ) {
+
+        try {
+
+            ws.send(
+                JSON.stringify({
+
+                    realtimeInput: {
+
+                        audioStreamEnd: true
+
+                    }
+
+                })
+            );
+
+        }
+
+        catch (e) {}
+
+    }
+
+
+    cleanupSession();
+
+}
+
+
+/* =========================================================
+   CLEANUP
+========================================================= */
+
+function cleanupSession() {
+
+    isConnected = false;
+
+
+    /* -----------------------------------------
+       STOP PLAYBACK
+    ----------------------------------------- */
+
+    stopAllPlayback();
+
+
+    /* -----------------------------------------
+       PROCESSOR
+    ----------------------------------------- */
+
+    if (processor) {
+
+        try {
+
+            processor.disconnect();
+
+        }
+
+        catch (e) {}
+
+
+        processor.onaudioprocess =
+            null;
+
+
+        processor = null;
+
+    }
+
+
+    /* -----------------------------------------
+       SILENT GAIN
+    ----------------------------------------- */
+
+    if (silentGain) {
+
+        try {
+
+            silentGain.disconnect();
+
+        }
+
+        catch (e) {}
+
+
+        silentGain = null;
+
+    }
+
+
+    /* -----------------------------------------
+       AUDIO INPUT
+    ----------------------------------------- */
+
+    if (audioInput) {
+
+        try {
+
+            audioInput.disconnect();
+
+        }
+
+        catch (e) {}
+
+
+        audioInput = null;
+
+    }
+
+
+    /* -----------------------------------------
+       MICROPHONE
+    ----------------------------------------- */
+
+    if (mediaStream) {
+
+        mediaStream
+            .getTracks()
+            .forEach(
+                track => track.stop()
+            );
+
+
+        mediaStream = null;
+
+    }
+
+
+    /* -----------------------------------------
+       INPUT AUDIO CONTEXT
+    ----------------------------------------- */
+
+    if (inputAudioContext) {
+
+        inputAudioContext
+            .close()
+            .catch(() => {});
+
+
+        inputAudioContext = null;
+
+    }
+
+
+    /* -----------------------------------------
+       PLAYBACK AUDIO CONTEXT
+    ----------------------------------------- */
+
+    if (playbackAudioContext) {
+
+        playbackAudioContext
+            .close()
+            .catch(() => {});
+
+
+        playbackAudioContext = null;
+
+    }
+
+
+    /* -----------------------------------------
+       WEBSOCKET
+    ----------------------------------------- */
+
+    if (ws) {
+
+        try {
+
+            if (
+                ws.readyState ===
+                WebSocket.OPEN ||
+                ws.readyState ===
+                WebSocket.CONNECTING
+            ) {
+
+                ws.close();
+
+            }
+
+        }
+
+        catch (e) {}
+
+
+        ws = null;
+
+    }
+
+
+    /* -----------------------------------------
+       RESET PLAYBACK
+    ----------------------------------------- */
+
+    activeSources.clear();
+
+    nextPlaybackTime = 0;
+
+    playbackGeneration++;
+
+
+    /* -----------------------------------------
+       UI
+    ----------------------------------------- */
+
+    const button =
+        document
+            .getElementById("mainBtn");
+
+
+    button.innerText =
+        "Kòmanse Konvèsasyon";
+
+
+    button.classList.remove(
+        "stop"
+    );
+
+
+    document
+        .getElementById("avatarIcon")
+        .classList.remove(
+            "active"
+        );
+
+
+    document
+        .getElementById("configSection")
+        .style.display =
+        "block";
+
+
+    document
+        .getElementById("status")
+        .innerText =
+        "Dekonekte";
+
+}
+
+</script>
+
+</body>
+</html>
