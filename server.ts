@@ -5,7 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { WebSocketServer, WebSocket } from "ws";
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
-import { lookupInstantWord } from "./src/utils/instantDictionary.js";
+import { lookupInstantWord } from "./utils/instantDictionary.js";
 
 const serverVocabCache = new Map<string, any>();
 
