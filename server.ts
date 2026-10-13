@@ -5,6 +5,9 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { WebSocketServer, WebSocket } from "ws";
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
+import { lookupInstantWord } from "./src/utils/instantDictionary";
+
+const serverVocabCache = new Map<string, any>();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -75,6 +78,95 @@ function createGeminiClient(customApiKey?: string) {
 let activeClientSocket: WebSocket | null = null;
 let activeCleanupFn: (() => void) | null = null;
 
+// Global session transcript buffer for resilient recap logging
+let latestSessionTranscript: Array<{ role: 'user' | 'coach'; text: string }> = [];
+
+function appendToSessionTranscript(role: 'user' | 'coach', chunk: string) {
+  if (!chunk) return;
+  const last = latestSessionTranscript[latestSessionTranscript.length - 1];
+  if (last && last.role === role) {
+    last.text += chunk;
+  } else {
+    latestSessionTranscript.push({ role, text: chunk });
+  }
+}
+
+function cleanMergeTurns(rawTurns: Array<{ role: string; text: string }>): Array<{ role: 'user' | 'coach'; text: string }> {
+  const merged: Array<{ role: 'user' | 'coach'; text: string }> = [];
+  for (const item of rawTurns) {
+    if (!item || typeof item.text !== 'string') continue;
+    const cleanText = item.text.trim();
+    if (!cleanText) continue;
+    const role = item.role === 'user' ? 'user' : 'coach';
+    const last = merged[merged.length - 1];
+    if (last && last.role === role) {
+      if (/^[.,!?;:'"’)]/.test(item.text) || /\s$/.test(last.text) || /^\s/.test(item.text)) {
+        last.text += item.text;
+      } else {
+        last.text += " " + item.text;
+      }
+    } else {
+      merged.push({ role, text: item.text.trimStart() });
+    }
+  }
+  return merged
+    .map(m => ({ ...m, text: m.text.replace(/\s+/g, ' ').trim() }))
+    .filter(m => m.text.length > 0);
+}
+
+function extractJson(rawText: string): any {
+  let cleaned = rawText.trim();
+  cleaned = cleaned.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const firstBrace = cleaned.indexOf("{");
+    const lastBrace = cleaned.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+    }
+    throw new Error("Failed to parse valid JSON from model response");
+  }
+}
+
+async function generateWithModelFallback(
+  ai: GoogleGenAI,
+  options: {
+    prompt: string;
+    systemInstruction?: string;
+    responseMimeType?: string;
+  }
+): Promise<{ model: string; text: string }> {
+  // Prioritize highly responsive models without thinking lag
+  const candidateModels = [
+    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3.8-flash",
+  ];
+
+  let lastError: any = null;
+  for (const model of candidateModels) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: options.prompt,
+        config: {
+          ...(options.systemInstruction ? { systemInstruction: options.systemInstruction } : {}),
+          ...(options.responseMimeType ? { responseMimeType: options.responseMimeType } : {}),
+        },
+      });
+      if (response && response.text) {
+        return { model, text: response.text };
+      }
+    } catch (err: any) {
+      lastError = err;
+      // On 503 or transient overload, switch immediately to next model without sleeping
+      continue;
+    }
+  }
+  throw lastError || new Error("All Gemini models failed to generate content");
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json());
@@ -94,80 +186,182 @@ async function startServer() {
       if (!word || typeof word !== "string") {
         return res.status(400).json({ error: "Word is required" });
       }
-      const ai = createGeminiClient(customKey);
-      const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents: `Explain the English word or phrase "${word}" for an English learner. Provide the explanation entirely in French (explications en français simple, NOT Haitian Creole). Include:
-1. French translation (Traduction)
-2. Meaning in context (Sens en contexte)
-3. Short example sentence with French translation (Exemple court)
-4. Pronunciation guide (Prononciation)
+      const trimmedWord = word.trim().replace(/^[.,!?;:'"“”()]+|[.,!?;:'"“”()]+$/g, "");
+      if (!trimmedWord) {
+        return res.status(400).json({ error: "Invalid word" });
+      }
 
-Format the response cleanly.`,
-        config: {
-          systemInstruction: "You are a helpful French-English dictionary and teacher. Provide clear, simple explanations in French.",
-        },
-      });
-      res.json({ explanation: response.text || "Explication non disponible." });
+      const lowerKey = trimmedWord.toLowerCase();
+
+      // 1. Check server-side memory cache (0ms)
+      if (serverVocabCache.has(lowerKey)) {
+        return res.json(serverVocabCache.get(lowerKey));
+      }
+
+      // 2. Check instant offline dictionary (0ms)
+      const instant = lookupInstantWord(trimmedWord);
+      if (instant) {
+        const result = {
+          word: trimmedWord,
+          frenchTranslation: instant.frenchTranslation,
+          creoleTranslation: instant.creoleTranslation,
+          meaningFr: instant.meaningFr,
+          exampleEn: instant.exampleEn,
+          exampleFr: instant.exampleFr,
+          exampleHt: instant.exampleHt,
+          pronunciation: instant.pronunciation || "",
+          explanation: `Traduction instantanée: ${instant.frenchTranslation}`,
+        };
+        serverVocabCache.set(lowerKey, result);
+        return res.json(result);
+      }
+
+      // 3. Fast LLM lookup with strict timeout for unlisted words
+      try {
+        const ai = createGeminiClient(customKey);
+        const timeoutPromise = new Promise<{ model: string; text: string }>((_, reject) =>
+          setTimeout(() => reject(new Error("Timeout")), 3500)
+        );
+
+        const llmPromise = generateWithModelFallback(ai, {
+          prompt: `Translate the English word "${trimmedWord}" to French and Haitian Creole with a simple example sentence.
+Return strict JSON:
+{
+  "word": "${trimmedWord}",
+  "frenchTranslation": "French translation",
+  "creoleTranslation": "Haitian Creole translation",
+  "meaningFr": "Short definition in French",
+  "exampleEn": "Simple English sentence using ${trimmedWord}",
+  "exampleFr": "French translation of the example sentence",
+  "exampleHt": "Haitian Creole translation of the example sentence",
+  "pronunciation": "Phonetic pronunciation"
+}`,
+          systemInstruction: "You are a bilingual French/Creole English teacher. Return concise strict JSON.",
+          responseMimeType: "application/json",
+        });
+
+        const { text } = await Promise.race([llmPromise, timeoutPromise]);
+        const parsed = extractJson(text);
+        const result = {
+          word: parsed.word || trimmedWord,
+          frenchTranslation: parsed.frenchTranslation || "",
+          creoleTranslation: parsed.creoleTranslation || "",
+          meaningFr: parsed.meaningFr || "",
+          exampleEn: parsed.exampleEn || "",
+          exampleFr: parsed.exampleFr || "",
+          exampleHt: parsed.exampleHt || "",
+          pronunciation: parsed.pronunciation || "",
+          explanation: text,
+        };
+        serverVocabCache.set(lowerKey, result);
+        return res.json(result);
+      } catch (fastErr) {
+        // Fallback for rare words when network or quota is down
+        const fallback = {
+          word: trimmedWord,
+          frenchTranslation: `Mot: ${trimmedWord}`,
+          creoleTranslation: `Mo: ${trimmedWord}`,
+          meaningFr: `Mot anglais utilisé dans la conversation.`,
+          exampleEn: `You practiced using the word "${trimmedWord}".`,
+          exampleFr: `Tu t'es entraîné à utiliser le mot "${trimmedWord}".`,
+          exampleHt: `Ou te pratike itilize mo "${trimmedWord}" la.`,
+          pronunciation: "",
+          explanation: `Dictionnaire bilingue`,
+        };
+        serverVocabCache.set(lowerKey, fallback);
+        return res.json(fallback);
+      }
     } catch (err: any) {
+      console.error("Vocab explanation error:", err);
       res.status(500).json({ error: err?.message || "Failed to explain word" });
     }
   });
 
   app.post("/api/recap", async (req, res) => {
     try {
-      const { transcripts } = req.body;
       const customKey = (req.headers["x-gemini-api-key"] as string) || req.body.apiKey;
-      if (!transcripts || !Array.isArray(transcripts) || transcripts.length === 0) {
+      const clientTranscripts = req.body.transcripts;
+      
+      const rawTranscripts =
+        Array.isArray(clientTranscripts) && clientTranscripts.length > 0
+          ? clientTranscripts
+          : latestSessionTranscript;
+
+      const mergedTranscripts = cleanMergeTurns(rawTranscripts);
+
+      if (mergedTranscripts.length === 0) {
         return res.json({
-          topicsSummary: "No conversation recorded.",
+          topicsSummary: "No spoken conversation recorded yet. Please start a call and practice speaking to generate a detailed recap.",
           studentPoints: [],
           minorCorrections: [],
           majorCorrections: [],
           noErrorsDetected: true,
           vocabulary: [],
-          strengths: ["Willingness to practice speaking English."],
-          areasToImprove: ["Continue practicing regular conversations."],
-          teacherFeedback: "Great effort starting your practice session! Keep talking regularly to build your confidence and fluency."
+          strengths: ["Ready to practice speaking English."],
+          areasToImprove: ["Start speaking during your call sessions."],
+          teacherFeedback: "Ready when you are! Connect to the call and talk with the coach to receive personalized grammar corrections and feedback."
         });
       }
 
-      const transcriptText = transcripts
-        .map((t: any) => `${t.role === 'user' ? 'Student' : 'Coach'}: ${t.text}`)
-        .join("\n");
+      const transcriptText = mergedTranscripts
+        .map((t) => `${t.role === 'user' ? 'Student' : 'Coach'}: ${t.text}`)
+        .join("\n\n");
 
       const ai = createGeminiClient(customKey);
-      const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents: `Analyze the following English coaching conversation transcript between Student and Teacher. Based strictly on the actual conversation:
+      const prompt = `Analyze the following English coaching conversation transcript between Student and Coach:
 
 Transcript:
 ${transcriptText}
 
-Extract all correction events for genuine English mistakes made by the student during the session, dividing them into minor errors and major errors.
-Allowed mistake types (category):
-- Grammar
-- Tense
-- Vocabulary
-- Word choice
-- Preposition
-- Article
-- Word form
-- Pronoun
-- Sentence structure
-- Subject-verb agreement
-- Other
+You are an expert English language assessor and teacher.
+Thoroughly examine everything the student said.
+
+TASKS:
+1. "topicsSummary": Detailed, concrete summary of the actual topics, subjects, and stories discussed in this conversation.
+2. "studentPoints": Array of specific ideas, opinions, or details actually expressed by the student during the conversation.
+3. Errors & Corrections:
+   Carefully review every sentence spoken by the student. Identify EVERY genuine English mistake made by the student.
+   Do NOT skip any mistake, even if the coach didn't interrupt or already discussed it.
+   Examine:
+   - Past tense irregular verbs (e.g. "I was go", "I buyed", "I make" when referring to past events, "I didn't went")
+   - Present perfect vs simple past (e.g. "I live here since 2 years" -> "I have lived here for 2 years")
+   - Comparative & superlative forms ("more tall" -> "taller", "most best" -> "best")
+   - Articles ("a apple" -> "an apple", missing "the" or "a")
+   - Prepositions ("interested on" -> "interested in", "depend of" -> "depend on", "listen me" -> "listen to me")
+   - Subject-verb agreement ("he have" -> "he has", "she don't" -> "she doesn't", "they was" -> "they were")
+   - French or Haitian Creole language transfer errors (e.g. "I have 20 years", "I am agree", "explain me", "take a photo to me")
+   - Word choice, vocabulary misuse, and awkward phrasing.
+   
+   Divide into:
+   - "minorCorrections": minor mistakes (slight article, preposition, minor word choice)
+   - "majorCorrections": significant mistakes (wrong verb tense, broken sentence structure, missing main verbs, agreement errors)
+   
+   For each correction item:
+   - "whatYouSaid": the exact student phrase
+   - "betterEnglish": the natural, correct English phrase
+   - "type": category (e.g. "Verb Tense", "Irregular Past", "Preposition", "Article", "Grammar", "Word Choice", "Agreement")
+   - "why": clear explanation of the rule, including French or Haitian Creole context when helpful so the student understands the reason
+4. "noErrorsDetected": set to true ONLY if the student made zero genuine English errors across the conversation. Otherwise false.
+5. "vocabulary": Useful English words or idiomatic expressions relevant to the conversation.
+   Include:
+   - "word": English word
+   - "frenchTranslation": French translation
+   - "creoleTranslation": Haitian Creole translation
+   - "meaning": clear definition in context
+6. "strengths": Array of concrete strengths shown by the student in this chat.
+7. "areasToImprove": Array of specific, actionable English areas to practice based on the errors made in this session.
+8. "teacherFeedback": Warm, personalized, encouraging evaluation written like a real English teacher directly referencing what was discussed.
 
 You must return a valid JSON object matching this exact structure:
 {
-  "topicsSummary": "Detailed summary of the actual topics and subjects discussed in this specific conversation",
-  "studentPoints": ["Specific idea, opinion, or point actually expressed by the student during the chat"],
+  "topicsSummary": "Detailed summary of the actual topics discussed",
+  "studentPoints": ["Specific point expressed by the student"],
   "minorCorrections": [
     {
       "whatYouSaid": "what the student said",
       "betterEnglish": "corrected version",
       "type": "Tense / Grammar / Article / etc.",
-      "why": "very short explanation"
+      "why": "clear explanation"
     }
   ],
   "majorCorrections": [
@@ -175,51 +369,40 @@ You must return a valid JSON object matching this exact structure:
       "whatYouSaid": "what the student said",
       "betterEnglish": "corrected version",
       "type": "Grammar / Sentence structure / etc.",
-      "why": "very short explanation"
+      "why": "clear explanation"
     }
   ],
   "noErrorsDetected": false,
   "vocabulary": [
     {
-      "word": "English word or expression used in the lesson",
-      "frenchTranslation": "French translation",
+      "word": "English word",
+      "frenchTranslation": "Traduction française",
+      "creoleTranslation": "Tradiksyon kreyòl",
       "meaning": "meaning in context"
     }
   ],
-  "strengths": ["Specific strength demonstrated by the student in this conversation"],
-  "areasToImprove": ["Specific English skill area to practice based on this conversation"],
-  "teacherFeedback": "A short, personalized, encouraging evaluation written like a real English teacher referencing the actual conversation."
+  "strengths": ["Demonstrated speaking strength"],
+  "areasToImprove": ["Specific skill area to practice"],
+  "teacherFeedback": "Personalized coaching feedback"
 }
 
 Rules:
-- CRITICAL: Every genuine English mistake made by the student during the conversation MUST be included in the recap (under minorCorrections or majorCorrections), EVEN IF the teacher already corrected or discussed it live during the conversation. The student needs to see all mistakes in the recap log for review so they do not repeat them.
+- CRITICAL: Every genuine English mistake made by the student during the conversation MUST be included in the recap.
 - If no genuine English errors were detected at all across the transcript, set "noErrorsDetected" to true, and leave minorCorrections and majorCorrections empty arrays.
-- Do NOT use placeholder text like "No major errors detected" if there were minor errors. List minor errors under minorCorrections.
-- Do NOT give a numerical score.
-- Do NOT invent information not present in the conversation.
-- Return strict JSON.`,
-        config: {
-          responseMimeType: "application/json",
-          systemInstruction: "You are an expert English teacher generating a precise correction log and lesson recap based strictly on the transcript. Return strict JSON."
-        }
+- Return strict JSON only.`;
+
+      const { text } = await generateWithModelFallback(ai, {
+        prompt,
+        systemInstruction: "You are an expert English teacher generating a precise correction log and lesson recap based strictly on the transcript. Return strict JSON.",
+        responseMimeType: "application/json",
       });
 
-      let jsonText = response.text || "{}";
-      jsonText = jsonText.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
-      const recapData = JSON.parse(jsonText);
+      const recapData = extractJson(text);
       res.json(recapData);
     } catch (err: any) {
       console.error("Recap generation error:", err);
-      res.json({
-        topicsSummary: "General English conversation practice.",
-        studentPoints: ["Participated in live voice practice."],
-        minorCorrections: [],
-        majorCorrections: [],
-        noErrorsDetected: true,
-        vocabulary: [],
-        strengths: ["Active participation in speaking."],
-        areasToImprove: ["Continue daily practice."],
-        teacherFeedback: "Good job practicing today! Keep up the regular conversation sessions."
+      res.status(500).json({
+        error: err?.message || "Failed to generate recap. Please verify your Gemini API key in Settings.",
       });
     }
   });
@@ -258,6 +441,7 @@ Rules:
       }
     }
     activeClientSocket = clientWs;
+    latestSessionTranscript = [];
 
     const reqUrl = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
     const requestedVoice = reqUrl.searchParams.get("voice") || "Zephyr";
@@ -363,19 +547,23 @@ Rules:
               }
             }
 
-            // 3. Forward secondary transcriptions if present
+            // 3. Forward secondary transcriptions if present & record to session buffer
             if (serverContent.inputTranscription?.text) {
+              const userText = serverContent.inputTranscription.text;
+              appendToSessionTranscript('user', userText);
               safeSend({
                 type: "input_transcription",
-                text: serverContent.inputTranscription.text,
+                text: userText,
                 turnId,
               });
             }
 
             if (serverContent.outputTranscription?.text) {
+              const coachText = serverContent.outputTranscription.text;
+              appendToSessionTranscript('coach', coachText);
               safeSend({
                 type: "output_transcription",
-                text: serverContent.outputTranscription.text,
+                text: coachText,
                 turnId,
               });
             }

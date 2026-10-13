@@ -18,6 +18,10 @@ import {
   X,
   Search,
   Settings,
+  RefreshCw,
+  ChevronDown,
+  ChevronUp,
+  Languages,
 } from "lucide-react";
 import {
   CoachVoiceAvatar,
@@ -28,6 +32,7 @@ import {
   decodeBase64Pcm16ToFloat32,
   calculateRmsLevel,
 } from "./utils/audioEngine";
+import { lookupInstantWord } from "./utils/instantDictionary";
 
 const AVAILABLE_VOICES = [
   { id: "Zephyr", label: "Zephyr · Warm & Natural" },
@@ -36,6 +41,62 @@ const AVAILABLE_VOICES = [
   { id: "Charon", label: "Charon · Calm & Steady" },
   { id: "Fenrir", label: "Fenrir · Deep & Direct" },
 ];
+
+export interface QuickWordDefinition {
+  word: string;
+  frenchTranslation: string;
+  creoleTranslation: string;
+  meaningFr: string;
+  exampleEn: string;
+  exampleFr: string;
+  exampleHt: string;
+  pronunciation: string;
+  explanation?: string;
+}
+
+interface InteractiveTextProps {
+  text: string;
+  onWordClick: (word: string) => void;
+  active?: boolean;
+  className?: string;
+}
+
+function InteractiveText({
+  text,
+  onWordClick,
+  active = true,
+  className = "",
+}: InteractiveTextProps) {
+  if (!text) return null;
+  if (!active) return <span className={className}>{text}</span>;
+
+  const tokens = text.split(/([a-zA-Z0-9'-]+)/);
+
+  return (
+    <span className={className}>
+      {tokens.map((token, index) => {
+        const isWord = /[a-zA-Z]/.test(token);
+        if (!isWord) {
+          return <span key={index}>{token}</span>;
+        }
+
+        return (
+          <span
+            key={index}
+            onClick={(e) => {
+              e.stopPropagation();
+              onWordClick(token);
+            }}
+            title={`Klike pou tradiksyon: "${token}"`}
+            className="cursor-pointer hover:bg-emerald-400/25 hover:text-emerald-300 rounded px-0.5 transition-colors underline decoration-dotted decoration-emerald-500/40 hover:decoration-solid select-text"
+          >
+            {token}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
 
 export default function App() {
   const [connectionState, setConnectionState] =
@@ -64,11 +125,102 @@ export default function App() {
   const [showRecapModal, setShowRecapModal] = useState<boolean>(false);
   const [recapData, setRecapData] = useState<any | null>(null);
   const [isRecapLoading, setIsRecapLoading] = useState<boolean>(false);
+  const [recapError, setRecapError] = useState<string | null>(null);
+  const [showTranscriptInRecap, setShowTranscriptInRecap] = useState<boolean>(false);
   const [hasCompletedCall, setHasCompletedCall] = useState<boolean>(false);
 
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
   const [customApiKey, setCustomApiKey] = useState<string>(() => localStorage.getItem('gemini_api_key') || '');
   const [apiKeySavedMessage, setApiKeySavedMessage] = useState<boolean>(false);
+
+  const [activeWordDefinition, setActiveWordDefinition] = useState<QuickWordDefinition | null>(null);
+  const [isWordLookupLoading, setIsWordLookupLoading] = useState<boolean>(false);
+  const [wordLookupError, setWordLookupError] = useState<string | null>(null);
+  const [isClickToTranslateActive, setIsClickToTranslateActive] = useState<boolean>(true);
+  const wordCacheRef = useRef<Map<string, QuickWordDefinition>>(new Map());
+
+  const handleSpeakWord = (text: string) => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      try {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = "en-US";
+        utterance.rate = 0.9;
+        window.speechSynthesis.speak(utterance);
+      } catch {
+        // Speech synthesis not supported or blocked
+      }
+    }
+  };
+
+  const handleQuickWordLookup = async (rawWord: string) => {
+    const clean = rawWord.trim().replace(/^[.,!?;:'"“”()]+|[.,!?;:'"“”()]+$/g, "");
+    if (!clean || clean.length < 2) return;
+
+    // 1. Check local memory cache (0ms instant!)
+    const cached = wordCacheRef.current.get(clean.toLowerCase());
+    if (cached) {
+      setActiveWordDefinition(cached);
+      setIsWordLookupLoading(false);
+      setWordLookupError(null);
+      return;
+    }
+
+    // 2. Check instant offline dictionary (0ms, NO API call, instant pop-up!)
+    const instant = lookupInstantWord(clean);
+    if (instant) {
+      const def: QuickWordDefinition = {
+        word: clean,
+        frenchTranslation: instant.frenchTranslation,
+        creoleTranslation: instant.creoleTranslation,
+        meaningFr: instant.meaningFr,
+        exampleEn: instant.exampleEn,
+        exampleFr: instant.exampleFr,
+        exampleHt: instant.exampleHt,
+        pronunciation: instant.pronunciation || "",
+      };
+      wordCacheRef.current.set(clean.toLowerCase(), def);
+      setActiveWordDefinition(def);
+      setIsWordLookupLoading(false);
+      setWordLookupError(null);
+      return;
+    }
+
+    // 3. Fallback for unlisted word: show modal with word title immediately
+    setActiveWordDefinition({
+      word: clean,
+      frenchTranslation: "",
+      creoleTranslation: "",
+      meaningFr: "",
+      exampleEn: "",
+      exampleFr: "",
+      exampleHt: "",
+      pronunciation: "",
+    });
+    setIsWordLookupLoading(true);
+    setWordLookupError(null);
+
+    try {
+      const res = await fetch("/api/vocab", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(customApiKey.trim() ? { "x-gemini-api-key": customApiKey.trim() } : {}),
+        },
+        body: JSON.stringify({ word: clean }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to translate word");
+      }
+      wordCacheRef.current.set(clean.toLowerCase(), data);
+      setActiveWordDefinition(data);
+    } catch (err: any) {
+      setWordLookupError(err?.message || "Erreur lors de la traduction du mot.");
+    } finally {
+      setIsWordLookupLoading(false);
+    }
+  };
 
   const handleSaveApiKey = (e: React.FormEvent) => {
     e.preventDefault();
@@ -80,10 +232,11 @@ export default function App() {
     }, 1200);
   };
 
-  const handleFetchRecap = async () => {
+  const handleFetchRecap = async (forceRefresh: boolean = false) => {
     setShowRecapModal(true);
-    if (recapData) return;
+    if (recapData && !forceRefresh) return;
     setIsRecapLoading(true);
+    setRecapError(null);
     try {
       const res = await fetch("/api/recap", {
         method: "POST",
@@ -94,19 +247,36 @@ export default function App() {
         body: JSON.stringify({ transcripts }),
       });
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to generate lesson recap.");
+      }
       setRecapData(data);
-    } catch {
-      setRecapData({
-        topicsSummary: "General English conversation practice.",
-        studentPoints: ["Active participation in live voice session."],
-        minorCorrections: [],
-        majorCorrections: [],
-        noErrorsDetected: true,
-        vocabulary: [],
-        strengths: ["Confident speaking practice."],
-        areasToImprove: ["Keep practicing regularly."],
-        teacherFeedback: "Great job completing your live session! Keep up the daily practice."
-      });
+
+      // Pre-populate word cache with vocabulary from the recap for instant 0ms lookups!
+      if (Array.isArray(data.vocabulary)) {
+        for (const item of data.vocabulary) {
+          if (item && item.word) {
+            const cleanKey = item.word.toLowerCase().trim();
+            if (!wordCacheRef.current.has(cleanKey)) {
+              wordCacheRef.current.set(cleanKey, {
+                word: item.word,
+                frenchTranslation: item.frenchTranslation || "",
+                creoleTranslation: item.creoleTranslation || "",
+                meaningFr: item.meaning || "",
+                exampleEn: item.example || `Example using "${item.word}"`,
+                exampleFr: "",
+                exampleHt: "",
+                pronunciation: "",
+              });
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      setRecapError(
+        err?.message ||
+          "Could not analyze the lesson. Please check your Gemini API key in Settings or try again."
+      );
     } finally {
       setIsRecapLoading(false);
     }
@@ -574,7 +744,17 @@ export default function App() {
             const updated = (prev + msg.text).trim();
             return updated.length > 180 ? updated.slice(-180) : updated;
           });
-          setTranscripts((prev) => [...prev, { role: 'user', text: msg.text }]);
+          setTranscripts((prev) => {
+            if (prev.length > 0 && prev[prev.length - 1].role === 'user') {
+              const updated = [...prev];
+              updated[updated.length - 1] = {
+                role: 'user',
+                text: updated[updated.length - 1].text + msg.text,
+              };
+              return updated;
+            }
+            return [...prev, { role: 'user', text: msg.text }];
+          });
         } else if (
           msg.type === "output_transcription" &&
           typeof msg.text === "string"
@@ -592,7 +772,7 @@ export default function App() {
               const updated = [...prev];
               updated[updated.length - 1] = {
                 role: 'coach',
-                text: updated[updated.length - 1].text + " " + msg.text
+                text: updated[updated.length - 1].text + msg.text,
               };
               return updated;
             }
@@ -724,7 +904,7 @@ export default function App() {
             className="min-h-[38px] px-3 py-1.5 rounded-xl bg-indigo-600/20 border border-indigo-500/40 hover:bg-indigo-600/30 text-xs font-medium text-indigo-300 flex items-center gap-1.5 transition-colors whitespace-nowrap"
           >
             <BookOpen className="w-3.5 h-3.5" />
-            <span>Vocab (FR)</span>
+            <span>Vocab (FR/HT)</span>
           </button>
 
           <button
@@ -903,7 +1083,7 @@ export default function App() {
           {(hasCompletedCall || transcripts.length > 0) && !isConnected && !isConnecting && (
             <button
               type="button"
-              onClick={handleFetchRecap}
+              onClick={() => handleFetchRecap()}
               className="w-full mb-3 min-h-[48px] px-4 py-2.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-xs font-semibold text-white shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 transition-transform active:scale-[0.98]"
             >
               <Award className="w-4 h-4" />
@@ -954,7 +1134,7 @@ export default function App() {
                 </div>
                 <div>
                   <h3 className="text-base font-semibold text-white">Vocabulary Help</h3>
-                  <p className="text-xs text-slate-400">Explication de vocabulaire en français</p>
+                  <p className="text-xs text-slate-400">Explications en français & kreyòl ayisyen</p>
                 </div>
               </div>
               <button
@@ -1009,31 +1189,142 @@ export default function App() {
                 </div>
                 <div>
                   <h3 className="text-base font-semibold text-white">Lesson Recap</h3>
-                  <p className="text-xs text-slate-400">Teacher evaluation & performance summary</p>
+                  <p className="text-xs text-slate-400">Teacher evaluation, grammar corrections & insights</p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowRecapModal(false)}
-                className="w-8 h-8 rounded-xl bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  title="Regenerate Recap"
+                  disabled={isRecapLoading}
+                  onClick={() => handleFetchRecap(true)}
+                  className="w-8 h-8 rounded-xl bg-slate-800 text-slate-400 hover:text-emerald-400 flex items-center justify-center transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isRecapLoading ? 'animate-spin' : ''}`} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowRecapModal(false)}
+                  className="w-8 h-8 rounded-xl bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             <div className="mt-4 flex-1 overflow-y-auto pr-2 space-y-5 text-xs text-slate-200">
               {isRecapLoading ? (
                 <div className="py-16 flex flex-col items-center justify-center gap-3">
                   <Search className="w-6 h-6 text-emerald-400 animate-spin" />
-                  <p className="text-slate-400 font-medium">Generating your lesson recap...</p>
+                  <p className="text-slate-300 font-medium">Analyzing your conversation & generating recap...</p>
+                  <p className="text-slate-500 text-[11px]">Identifying speech patterns and checking grammar...</p>
+                </div>
+              ) : recapError ? (
+                <div className="py-8 space-y-4">
+                  <div className="p-4 rounded-2xl bg-rose-950/60 border border-rose-500/40 text-rose-200 space-y-2">
+                    <div className="flex items-center gap-2 font-semibold text-rose-300">
+                      <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                      <span>Recap Generation Error</span>
+                    </div>
+                    <p className="text-xs text-rose-200/90 leading-relaxed">{recapError}</p>
+                  </div>
+                  <div className="flex gap-2 justify-center pt-2">
+                    <button
+                      type="button"
+                      onClick={() => handleFetchRecap(true)}
+                      className="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Retry Analysis</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowRecapModal(false);
+                        setShowSettingsModal(true);
+                      }}
+                      className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+                    >
+                      <Settings className="w-3.5 h-3.5" />
+                      <span>Open API Key Settings</span>
+                    </button>
+                  </div>
                 </div>
               ) : recapData ? (
                 <>
+                  {/* Interactive Word Translation Banner */}
+                  <div className="p-3 rounded-2xl bg-indigo-950/40 border border-indigo-500/30 flex items-center justify-between gap-3 text-xs">
+                    <div className="flex items-center gap-2 text-indigo-200 min-w-0">
+                      <Languages className="w-4 h-4 text-indigo-400 shrink-0" />
+                      <span className="leading-snug">
+                        <strong className="text-white">Tradiksyon dirèk :</strong> Klike sou nenpòt mo an angle pou wè tradiksyon an & egzanp an fransè!
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsClickToTranslateActive((prev) => !prev)}
+                      className={`px-2.5 py-1 rounded-xl text-[11px] font-semibold transition-colors shrink-0 ${
+                        isClickToTranslateActive
+                          ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                          : "bg-slate-800 text-slate-400 border border-slate-700"
+                      }`}
+                    >
+                      {isClickToTranslateActive ? "Aktif (ON)" : "Inaktif (OFF)"}
+                    </button>
+                  </div>
+
+                  {/* Optional transcript review accordian */}
+                  {transcripts.length > 0 && (
+                    <div className="rounded-2xl border border-slate-800/80 bg-slate-950/60 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setShowTranscriptInRecap((prev) => !prev)}
+                        className="w-full px-3.5 py-2.5 flex items-center justify-between text-slate-400 hover:text-slate-200 text-xs font-medium transition-colors"
+                      >
+                        <span>Recorded Conversation Dialogue ({transcripts.length} turns)</span>
+                        {showTranscriptInRecap ? (
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        ) : (
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                      {showTranscriptInRecap && (
+                        <div className="p-3 border-t border-slate-800/80 space-y-2 max-h-48 overflow-y-auto text-[11px]">
+                          {transcripts.map((t, idx) => (
+                            <div
+                              key={idx}
+                              className={`p-2 rounded-xl leading-relaxed ${
+                                t.role === 'user'
+                                  ? 'bg-emerald-950/30 border border-emerald-500/20 text-emerald-200'
+                                  : 'bg-slate-900 border border-slate-800 text-slate-300'
+                              }`}
+                            >
+                              <span className="font-semibold mr-1.5 opacity-80">
+                                {t.role === 'user' ? 'Student:' : 'Coach:'}
+                              </span>
+                              <InteractiveText
+                                text={t.text}
+                                onWordClick={handleQuickWordLookup}
+                                active={isClickToTranslateActive}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800">
                     <h4 className="font-semibold text-emerald-400 flex items-center gap-1.5 mb-1.5 text-xs uppercase tracking-wider">
                       <span>1. What We Talked About</span>
                     </h4>
-                    <p className="text-slate-300 leading-relaxed">{recapData.topicsSummary}</p>
+                    <p className="text-slate-300 leading-relaxed">
+                      <InteractiveText
+                        text={recapData.topicsSummary}
+                        onWordClick={handleQuickWordLookup}
+                        active={isClickToTranslateActive}
+                      />
+                    </p>
                   </div>
 
                   {recapData.studentPoints && recapData.studentPoints.length > 0 && (
@@ -1043,7 +1334,13 @@ export default function App() {
                       </h4>
                       <ul className="list-disc list-inside space-y-1 text-slate-300">
                         {recapData.studentPoints.map((pt: string, i: number) => (
-                          <li key={i}>{pt}</li>
+                          <li key={i}>
+                            <InteractiveText
+                              text={pt}
+                              onWordClick={handleQuickWordLookup}
+                              active={isClickToTranslateActive}
+                            />
+                          </li>
                         ))}
                       </ul>
                     </div>
@@ -1051,40 +1348,94 @@ export default function App() {
 
                   <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800">
                     <h4 className="font-semibold text-amber-400 flex items-center gap-1.5 mb-2 text-xs uppercase tracking-wider">
-                      <span>3. Corrections & Refinements</span>
+                      <span>3. Corrections & Grammar Refinements</span>
                     </h4>
                     {recapData.noErrorsDetected ? (
-                      <p className="text-emerald-300 italic text-xs">No genuine English errors were detected during this session.</p>
+                      <p className="text-emerald-300 italic text-xs">No genuine English errors were detected during this session! Excellent work.</p>
                     ) : (
                       <div className="space-y-4">
-                        {recapData.minorCorrections && recapData.minorCorrections.length > 0 && (
+                        {recapData.majorCorrections && recapData.majorCorrections.length > 0 && (
                           <div>
-                            <h5 className="text-slate-400 font-semibold mb-2 text-[11px] uppercase tracking-wide">Minor errors:</h5>
+                            <h5 className="text-rose-400 font-semibold mb-2 text-[11px] uppercase tracking-wide flex items-center gap-1.5">
+                              <span className="w-2 h-2 rounded-full bg-rose-400"></span>
+                              <span>Major corrections:</span>
+                            </h5>
                             <div className="space-y-2.5">
-                              {recapData.minorCorrections.map((c: any, i: number) => (
-                                <div key={i} className="p-3 rounded-xl bg-slate-900 border border-slate-800/80 space-y-1">
-                                  <div className="text-slate-300 font-medium">
-                                    <span className="font-mono text-emerald-400 font-semibold mr-1">{i + 1}.</span> "{c.whatYouSaid}" → "{c.betterEnglish}"
+                              {recapData.majorCorrections.map((c: any, i: number) => (
+                                <div key={i} className="p-3 rounded-xl bg-slate-900 border border-rose-500/40 space-y-1.5">
+                                  <div className="flex flex-col gap-1">
+                                    <div className="text-rose-300 font-medium line-through decoration-rose-500/70">
+                                      <span className="font-mono text-rose-400 font-semibold mr-1">{i + 1}.</span> "
+                                      <InteractiveText
+                                        text={c.whatYouSaid}
+                                        onWordClick={handleQuickWordLookup}
+                                        active={isClickToTranslateActive}
+                                      />"
+                                    </div>
+                                    <div className="text-emerald-300 font-semibold">
+                                      <span className="text-slate-400 mr-1.5">Better English:</span> "
+                                      <InteractiveText
+                                        text={c.betterEnglish}
+                                        onWordClick={handleQuickWordLookup}
+                                        active={isClickToTranslateActive}
+                                      />"
+                                    </div>
                                   </div>
-                                  <div className="text-amber-300 text-[11px] font-medium"><span className="text-slate-400 font-normal">Type:</span> {c.type}</div>
-                                  <div className="text-slate-400 italic text-[11px]"><span className="text-slate-400 not-italic font-medium">Explanation:</span> {c.why}</div>
+                                  <div className="text-amber-300 text-[11px] font-medium">
+                                    <span className="text-slate-400 font-normal">Type:</span> {c.type}
+                                  </div>
+                                  <div className="text-slate-300 italic text-[11px] leading-relaxed">
+                                    <span className="text-slate-400 not-italic font-medium">Explanation:</span>{" "}
+                                    <InteractiveText
+                                      text={c.why}
+                                      onWordClick={handleQuickWordLookup}
+                                      active={isClickToTranslateActive}
+                                    />
+                                  </div>
                                 </div>
                               ))}
                             </div>
                           </div>
                         )}
 
-                        {recapData.majorCorrections && recapData.majorCorrections.length > 0 && (
-                          <div className="mt-3">
-                            <h5 className="text-slate-400 font-semibold mb-2 text-[11px] uppercase tracking-wide">Major errors:</h5>
+                        {recapData.minorCorrections && recapData.minorCorrections.length > 0 && (
+                          <div className={recapData.majorCorrections?.length > 0 ? "mt-3 pt-3 border-t border-slate-800/80" : ""}>
+                            <h5 className="text-amber-400 font-semibold mb-2 text-[11px] uppercase tracking-wide flex items-center gap-1.5">
+                              <span className="w-2 h-2 rounded-full bg-amber-400"></span>
+                              <span>Minor corrections:</span>
+                            </h5>
                             <div className="space-y-2.5">
-                              {recapData.majorCorrections.map((c: any, i: number) => (
-                                <div key={i} className="p-3 rounded-xl bg-slate-900 border border-rose-500/30 space-y-1">
-                                  <div className="text-slate-300 font-medium">
-                                    <span className="font-mono text-rose-400 font-semibold mr-1">{i + 1}.</span> "{c.whatYouSaid}" → "{c.betterEnglish}"
+                              {recapData.minorCorrections.map((c: any, i: number) => (
+                                <div key={i} className="p-3 rounded-xl bg-slate-900 border border-amber-500/30 space-y-1.5">
+                                  <div className="flex flex-col gap-1">
+                                    <div className="text-amber-200 font-medium">
+                                      <span className="font-mono text-amber-400 font-semibold mr-1">{i + 1}.</span> "
+                                      <InteractiveText
+                                        text={c.whatYouSaid}
+                                        onWordClick={handleQuickWordLookup}
+                                        active={isClickToTranslateActive}
+                                      />"
+                                    </div>
+                                    <div className="text-emerald-300 font-semibold">
+                                      <span className="text-slate-400 mr-1.5">Better English:</span> "
+                                      <InteractiveText
+                                        text={c.betterEnglish}
+                                        onWordClick={handleQuickWordLookup}
+                                        active={isClickToTranslateActive}
+                                      />"
+                                    </div>
                                   </div>
-                                  <div className="text-amber-300 text-[11px] font-medium"><span className="text-slate-400 font-normal">Type:</span> {c.type}</div>
-                                  <div className="text-slate-400 italic text-[11px]"><span className="text-slate-400 not-italic font-medium">Explanation:</span> {c.why}</div>
+                                  <div className="text-amber-300 text-[11px] font-medium">
+                                    <span className="text-slate-400 font-normal">Type:</span> {c.type}
+                                  </div>
+                                  <div className="text-slate-300 italic text-[11px] leading-relaxed">
+                                    <span className="text-slate-400 not-italic font-medium">Explanation:</span>{" "}
+                                    <InteractiveText
+                                      text={c.why}
+                                      onWordClick={handleQuickWordLookup}
+                                      active={isClickToTranslateActive}
+                                    />
+                                  </div>
                                 </div>
                               ))}
                             </div>
@@ -1102,14 +1453,27 @@ export default function App() {
                   {recapData.vocabulary && recapData.vocabulary.length > 0 && (
                     <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800">
                       <h4 className="font-semibold text-indigo-400 flex items-center gap-1.5 mb-2 text-xs uppercase tracking-wider">
-                        <span>4. Useful Vocabulary</span>
+                        <span>4. Useful Vocabulary & Expressions</span>
                       </h4>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {recapData.vocabulary.map((v: any, i: number) => (
-                          <div key={i} className="p-2.5 rounded-xl bg-slate-900 border border-slate-800">
-                            <div className="font-semibold text-white">{v.word}</div>
-                            <div className="text-indigo-300">{v.frenchTranslation}</div>
-                            <div className="text-slate-400 text-[11px] mt-0.5">{v.meaning}</div>
+                          <div
+                            key={i}
+                            onClick={() => handleQuickWordLookup(v.word)}
+                            className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-indigo-500/40 cursor-pointer space-y-0.5 transition-colors group"
+                            title="Klike pou wè egzanp ak detay"
+                          >
+                            <div className="font-semibold text-white group-hover:text-indigo-300 flex items-center justify-between">
+                              <span>{v.word}</span>
+                              <span className="text-[10px] text-indigo-400 opacity-60 group-hover:opacity-100">Klike</span>
+                            </div>
+                            <div className="text-indigo-300 text-[11px] flex items-center gap-2">
+                              <span>FR: {v.frenchTranslation}</span>
+                              {v.creoleTranslation && (
+                                <span className="text-teal-300">· HT: {v.creoleTranslation}</span>
+                              )}
+                            </div>
+                            <div className="text-slate-400 text-[11px] mt-0.5 leading-relaxed">{v.meaning}</div>
                           </div>
                         ))}
                       </div>
@@ -1121,7 +1485,13 @@ export default function App() {
                       <h4 className="font-semibold text-emerald-400 mb-1.5 text-xs uppercase tracking-wider">5. Strengths</h4>
                       <ul className="list-disc list-inside space-y-1 text-slate-300">
                         {recapData.strengths?.map((s: string, i: number) => (
-                          <li key={i}>{s}</li>
+                          <li key={i}>
+                            <InteractiveText
+                              text={s}
+                              onWordClick={handleQuickWordLookup}
+                              active={isClickToTranslateActive}
+                            />
+                          </li>
                         ))}
                       </ul>
                     </div>
@@ -1129,7 +1499,13 @@ export default function App() {
                       <h4 className="font-semibold text-sky-400 mb-1.5 text-xs uppercase tracking-wider">6. Areas to Improve</h4>
                       <ul className="list-disc list-inside space-y-1 text-slate-300">
                         {recapData.areasToImprove?.map((a: string, i: number) => (
-                          <li key={i}>{a}</li>
+                          <li key={i}>
+                            <InteractiveText
+                              text={a}
+                              onWordClick={handleQuickWordLookup}
+                              active={isClickToTranslateActive}
+                            />
+                          </li>
                         ))}
                       </ul>
                     </div>
@@ -1137,7 +1513,15 @@ export default function App() {
 
                   <div className="p-4 rounded-2xl bg-gradient-to-br from-emerald-950/40 via-slate-950 to-slate-950 border border-emerald-500/30">
                     <h4 className="font-semibold text-emerald-300 mb-1 text-xs uppercase tracking-wider">7. Teacher Feedback</h4>
-                    <p className="text-slate-200 leading-relaxed italic">"{recapData.teacherFeedback}"</p>
+                    <p className="text-slate-200 leading-relaxed italic">
+                      "
+                      <InteractiveText
+                        text={recapData.teacherFeedback}
+                        onWordClick={handleQuickWordLookup}
+                        active={isClickToTranslateActive}
+                      />
+                      "
+                    </p>
                   </div>
                 </>
               ) : (
@@ -1145,13 +1529,172 @@ export default function App() {
               )}
             </div>
 
-            <div className="mt-4 pt-3 border-t border-slate-800 flex justify-end">
+            <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between">
+              {recapData && (
+                <button
+                  type="button"
+                  disabled={isRecapLoading}
+                  onClick={() => handleFetchRecap(true)}
+                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Regenerate Recap</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setShowRecapModal(false)}
-                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition-colors"
+                className="ml-auto px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition-colors"
               >
                 Close Recap
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Word Translation Modal */}
+      {activeWordDefinition && (
+        <div className="fixed inset-0 z-[60] bg-black/65 backdrop-blur-sm flex items-end sm:items-center justify-center p-3 sm:p-4">
+          <div className="bg-slate-900 border border-slate-700/90 rounded-3xl w-full max-w-md p-5 shadow-2xl flex flex-col space-y-4 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+                  <Languages className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-bold text-white capitalize truncate">
+                      {activeWordDefinition.word}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => handleSpeakWord(activeWordDefinition.word)}
+                      title="Koute pwononsyasyon (Listen)"
+                      className="w-7 h-7 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-400 flex items-center justify-center transition-colors shrink-0"
+                    >
+                      <Volume2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  {activeWordDefinition.pronunciation && (
+                    <span className="text-[11px] font-mono text-slate-400 truncate block">
+                      {activeWordDefinition.pronunciation}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveWordDefinition(null)}
+                className="w-7 h-7 rounded-xl bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center transition-colors shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {isWordLookupLoading ? (
+              <div className="py-8 flex flex-col items-center justify-center gap-2.5 text-xs text-slate-400">
+                <Search className="w-5 h-5 text-emerald-400 animate-spin" />
+                <span>Ap chèche tradiksyon ak egzanp an fransè...</span>
+              </div>
+            ) : wordLookupError ? (
+              <div className="py-4 space-y-3">
+                <p className="text-xs text-rose-300 bg-rose-950/40 border border-rose-500/30 p-3 rounded-xl leading-relaxed">
+                  {wordLookupError}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => handleQuickWordLookup(activeWordDefinition.word)}
+                  className="w-full py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-slate-200"
+                >
+                  Re-eseye
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3.5 text-xs">
+                {/* Translations badges */}
+                <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 space-y-1.5">
+                  <div className="text-[11px] text-slate-400 uppercase tracking-wider font-semibold">
+                    Tradiksyon
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                    {activeWordDefinition.frenchTranslation && (
+                      <div className="px-2.5 py-1 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-semibold text-xs flex items-center gap-1.5">
+                        <span>🇫🇷 FR:</span>
+                        <span>{activeWordDefinition.frenchTranslation}</span>
+                      </div>
+                    )}
+                    {activeWordDefinition.creoleTranslation && (
+                      <div className="px-2.5 py-1 rounded-xl bg-teal-500/20 border border-teal-500/40 text-teal-300 font-semibold text-xs flex items-center gap-1.5">
+                        <span>🇭🇹 HT:</span>
+                        <span>{activeWordDefinition.creoleTranslation}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Meaning in French */}
+                {activeWordDefinition.meaningFr && (
+                  <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 space-y-1">
+                    <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                      Sens en français
+                    </span>
+                    <p className="text-slate-200 leading-relaxed">
+                      {activeWordDefinition.meaningFr}
+                    </p>
+                  </div>
+                )}
+
+                {/* Example sentence in French & English */}
+                {(activeWordDefinition.exampleEn || activeWordDefinition.exampleFr) && (
+                  <div className="p-3.5 rounded-2xl bg-gradient-to-br from-indigo-950/30 via-slate-950 to-slate-950 border border-indigo-500/30 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-semibold text-indigo-300 uppercase tracking-wider flex items-center gap-1.5">
+                        <BookOpen className="w-3.5 h-3.5" />
+                        <span>Exemple de phrase (Egzanp fraz)</span>
+                      </span>
+                      {activeWordDefinition.exampleEn && (
+                        <button
+                          type="button"
+                          onClick={() => handleSpeakWord(activeWordDefinition.exampleEn)}
+                          title="Koute fraz la"
+                          className="px-2 py-1 rounded-lg bg-indigo-900/40 hover:bg-indigo-900/60 text-indigo-300 flex items-center gap-1 text-[11px] font-medium"
+                        >
+                          <Volume2 className="w-3 h-3" />
+                          <span>Koute</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {activeWordDefinition.exampleEn && (
+                      <p className="text-white font-medium italic leading-relaxed">
+                        "{activeWordDefinition.exampleEn}"
+                      </p>
+                    )}
+                    {activeWordDefinition.exampleFr && (
+                      <p className="text-emerald-300 text-[11px] leading-relaxed">
+                        <span className="text-slate-400 mr-1 font-medium">🇫🇷:</span>
+                        {activeWordDefinition.exampleFr}
+                      </p>
+                    )}
+                    {activeWordDefinition.exampleHt && (
+                      <p className="text-teal-300 text-[11px] leading-relaxed">
+                        <span className="text-slate-400 mr-1 font-medium">🇭🇹:</span>
+                        {activeWordDefinition.exampleHt}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="pt-2 border-t border-slate-800 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setActiveWordDefinition(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition-colors"
+              >
+                Fèmen (Close)
               </button>
             </div>
           </div>

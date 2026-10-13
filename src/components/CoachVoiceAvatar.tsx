@@ -1,5 +1,6 @@
 import React from "react";
 import { Mic, MicOff, Volume2, Radio, Sparkles } from "lucide-react";
+import { LOGO_SRC } from "../logo";
 
 export type CallConnectionState =
   | "idle"
@@ -97,35 +98,35 @@ export const CoachVoiceAvatar: React.FC<CoachVoiceAvatarProps> = ({
   };
 
   return (
-    <div className="flex flex-col items-center justify-center py-4 select-none">
-      <div className="relative flex items-center justify-center w-56 h-56 sm:w-64 sm:h-64">
+    <div className="flex flex-col items-center justify-center py-6 select-none">
+      <div className="relative flex items-center justify-center w-64 h-64 sm:w-72 sm:h-72">
         <div
           style={{
             transform: `scale(${outerRingScale.toFixed(3)})`,
-            opacity: isConnected ? (isCoachSpeaking || isUserSpeaking ? 0.45 : 0.18) : 0.08,
+            opacity: isConnected ? (isCoachSpeaking || isUserSpeaking ? 0.55 : 0.25) : 0.1,
           }}
-          className={`absolute inset-2 rounded-full transition-transform duration-75 ease-out ${
+          className={`absolute inset-0 rounded-full transition-transform duration-100 ease-out blur-xl ${
             isCoachSpeaking
-              ? "bg-amber-400/25 border border-amber-400/40"
+              ? "bg-gradient-to-tr from-amber-500/40 via-orange-500/30 to-yellow-400/30"
               : isUserSpeaking
-              ? "bg-emerald-400/25 border border-emerald-400/40"
-              : "bg-slate-400/15 border border-slate-500/20"
+              ? "bg-gradient-to-tr from-emerald-500/40 via-teal-500/30 to-cyan-400/30"
+              : "bg-gradient-to-tr from-indigo-500/20 via-slate-700/20 to-slate-800/10"
           }`}
         />
 
         <div
           style={{
             transform: `scale(${midRingScale.toFixed(3)})`,
-            opacity: isConnected ? (isCoachSpeaking || isUserSpeaking ? 0.65 : 0.28) : 0.12,
+            opacity: isConnected ? (isCoachSpeaking || isUserSpeaking ? 0.7 : 0.35) : 0.15,
           }}
-          className={`absolute inset-7 rounded-full transition-transform duration-75 ease-out ${
+          className={`absolute inset-6 rounded-full transition-transform duration-75 ease-out ${
             isCoachSpeaking
-              ? "bg-amber-500/20 border border-amber-300/50"
+              ? "bg-amber-500/20 border-2 border-amber-400/50 shadow-[0_0_25px_rgba(245,158,11,0.3)]"
               : isUserSpeaking
-              ? "bg-emerald-500/20 border border-emerald-300/50"
+              ? "bg-emerald-500/20 border-2 border-emerald-400/50 shadow-[0_0_25px_rgba(52,211,153,0.3)]"
               : isConnecting
-              ? "bg-sky-500/20 border border-sky-400/40 animate-pulse"
-              : "bg-slate-700/30 border border-slate-600/30"
+              ? "bg-sky-500/20 border-2 border-sky-400/40 animate-pulse"
+              : "bg-slate-800/40 border border-slate-700/40"
           }`}
         />
 
@@ -133,96 +134,105 @@ export const CoachVoiceAvatar: React.FC<CoachVoiceAvatarProps> = ({
           style={{
             transform: `scale(${coreScale.toFixed(3)})`,
           }}
-          className={`relative z-10 flex flex-col items-center justify-center w-36 h-36 sm:w-40 sm:h-40 rounded-full border transition-all duration-150 shadow-2xl ${
+          className={`relative z-10 flex flex-col items-center justify-center w-40 h-40 sm:w-44 sm:h-44 rounded-full overflow-hidden border backdrop-blur-2xl transition-all duration-150 shadow-[0_0_40px_rgba(0,0,0,0.6)] ${
             isCoachSpeaking
-              ? "bg-gradient-to-b from-amber-500/30 via-slate-900 to-slate-950 border-amber-400/60 shadow-amber-500/20"
+              ? "border-amber-400/70 shadow-amber-500/30"
               : isUserSpeaking
-              ? "bg-gradient-to-b from-emerald-500/30 via-slate-900 to-slate-950 border-emerald-400/60 shadow-emerald-500/20"
+              ? "border-emerald-400/70 shadow-emerald-500/30"
               : isConnected
-              ? "bg-gradient-to-b from-slate-800 via-slate-900 to-slate-950 border-emerald-500/40 shadow-emerald-950/30"
+              ? "border-emerald-500/50 shadow-emerald-950/40"
               : isConnecting
-              ? "bg-gradient-to-b from-slate-800 via-slate-900 to-slate-950 border-sky-400/50"
-              : "bg-gradient-to-b from-slate-800/90 via-slate-900 to-slate-950 border-slate-700/70"
+              ? "border-sky-400/60 shadow-sky-950/40"
+              : "border-slate-700/80 shadow-slate-950/50"
           }`}
         >
-          <div className="flex items-center justify-center gap-1.5 h-12 mb-1">
-            {[0.45, 0.75, 1.0, 0.85, 0.55].map((multiplier, idx) => {
-              const barLevel = isCoachSpeaking
-                ? Math.max(0.22, Math.min(1, coachLevel * multiplier * 1.35))
-                : isUserSpeaking
-                ? Math.max(0.2, Math.min(1, micLevel * multiplier * 1.35))
-                : isConnected
-                ? 0.18
-                : 0.12;
+          {/* Logo filling all the space of the circle */}
+          <img src={LOGO_SRC} alt="App Logo" className="absolute inset-0 w-full h-full object-cover" />
 
-              return (
-                <span
-                  key={idx}
-                  style={{
-                    transform: `scaleY(${barLevel.toFixed(2)})`,
-                  }}
-                  className={`w-1.5 h-10 rounded-full origin-center transition-transform duration-75 ${
-                    isCoachSpeaking
-                      ? "bg-amber-300"
-                      : isUserSpeaking
-                      ? "bg-emerald-300"
-                      : isConnected
-                      ? "bg-emerald-400/60"
-                      : isConnecting
-                      ? "bg-sky-300/70 animate-pulse"
-                      : "bg-slate-600"
-                  }`}
-                />
-              );
-            })}
-          </div>
+          {/* Dark overlay gradient to make content readable over the logo */}
+          <div className="absolute inset-0 bg-slate-950/65 backdrop-blur-[2px]" />
 
-          <div className="flex items-center gap-1.5 text-xs font-medium tracking-wide text-slate-300">
-            {isCoachSpeaking ? (
-              <>
-                <Volume2 className="w-3.5 h-3.5 text-amber-300" />
-                <span className="text-amber-200">{voiceName}</span>
-              </>
-            ) : isConnected && isMicMuted ? (
-              <>
-                <MicOff className="w-3.5 h-3.5 text-rose-400" />
-                <span className="text-rose-300">Muted</span>
-              </>
-            ) : isConnected ? (
-              <>
-                <Mic className="w-3.5 h-3.5 text-emerald-400" />
-                <span className="text-emerald-200">{voiceName}</span>
-              </>
-            ) : isConnecting ? (
-              <>
-                <Radio className="w-3.5 h-3.5 text-sky-400 animate-spin" />
-                <span className="text-sky-200">Connecting</span>
-              </>
-            ) : (
-              <>
-                <Sparkles className="w-3.5 h-3.5 text-slate-400" />
-                <span className="text-slate-400">Coach {voiceName}</span>
-              </>
-            )}
+          {/* Content overlay */}
+          <div className="relative z-10 flex flex-col items-center justify-center w-full h-full p-2">
+            <div className="flex items-center justify-center gap-1 h-8 mb-1">
+              {[0.45, 0.75, 1.0, 0.85, 0.55].map((multiplier, idx) => {
+                const barLevel = isCoachSpeaking
+                  ? Math.max(0.25, Math.min(1, coachLevel * multiplier * 1.4))
+                  : isUserSpeaking
+                  ? Math.max(0.22, Math.min(1, micLevel * multiplier * 1.4))
+                  : isConnected
+                  ? 0.2
+                  : 0.12;
+
+                return (
+                  <span
+                    key={idx}
+                    style={{
+                      transform: `scaleY(${barLevel.toFixed(2)})`,
+                    }}
+                    className={`w-1 h-8 rounded-full origin-center transition-transform duration-75 shadow-sm ${
+                      isCoachSpeaking
+                        ? "bg-gradient-to-t from-amber-400 to-yellow-200 shadow-amber-400/50"
+                        : isUserSpeaking
+                        ? "bg-gradient-to-t from-emerald-400 to-teal-200 shadow-emerald-400/50"
+                        : isConnected
+                        ? "bg-emerald-400/70"
+                        : isConnecting
+                        ? "bg-sky-300/80 animate-pulse"
+                        : "bg-slate-600"
+                    }`}
+                  />
+                );
+              })}
+            </div>
+
+            <div className="flex items-center gap-1 text-[11px] font-semibold tracking-wide text-slate-200">
+              {isCoachSpeaking ? (
+                <>
+                  <Volume2 className="w-3 h-3 text-amber-300 animate-bounce" />
+                  <span className="text-amber-200 drop-shadow-sm">{voiceName}</span>
+                </>
+              ) : isConnected && isMicMuted ? (
+                <>
+                  <MicOff className="w-3 h-3 text-rose-400" />
+                  <span className="text-rose-300">Muted</span>
+                </>
+              ) : isConnected ? (
+                <>
+                  <Mic className="w-3 h-3 text-emerald-400" />
+                  <span className="text-emerald-200">{voiceName}</span>
+                </>
+              ) : isConnecting ? (
+                <>
+                  <Radio className="w-3 h-3 text-sky-400 animate-spin" />
+                  <span className="text-sky-200">Connecting</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3 h-3 text-indigo-400" />
+                  <span className="text-slate-300">{voiceName}</span>
+                </>
+              )}
+            </div>
           </div>
         </div>
       </div>
 
-      <div className="mt-3 text-center px-4 max-w-sm">
+      <div className="mt-4 text-center px-4 max-w-sm">
         <p
-          className={`text-lg sm:text-xl font-semibold tracking-tight transition-colors ${
+          className={`text-xl sm:text-2xl font-bold tracking-tight transition-colors drop-shadow-sm ${
             wasRecentlyInterrupted
               ? "text-emerald-300"
               : isCoachSpeaking
               ? "text-amber-200"
               : isConnected
               ? "text-white"
-              : "text-slate-200"
+              : "text-slate-100"
           }`}
         >
           {getPrimaryStateLabel()}
         </p>
-        <p className="mt-1 text-xs sm:text-sm text-slate-400 leading-relaxed">
+        <p className="mt-1.5 text-xs sm:text-sm text-slate-400 leading-relaxed font-medium">
           {getSecondaryStateHint()}
         </p>
       </div>
