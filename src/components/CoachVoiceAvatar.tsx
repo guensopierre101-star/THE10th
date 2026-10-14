@@ -1,6 +1,5 @@
 import React from "react";
 import { Mic, MicOff, Volume2, Radio, Sparkles } from "lucide-react";
-import { LOGO_SRC } from "../logo";
 
 export type CallConnectionState =
   | "idle"
@@ -136,21 +135,16 @@ export const CoachVoiceAvatar: React.FC<CoachVoiceAvatarProps> = ({
           }}
           className={`relative z-10 flex flex-col items-center justify-center w-40 h-40 sm:w-44 sm:h-44 rounded-full overflow-hidden border backdrop-blur-2xl transition-all duration-150 shadow-[0_0_40px_rgba(0,0,0,0.6)] ${
             isCoachSpeaking
-              ? "border-amber-400/70 shadow-amber-500/30"
+              ? "border-amber-400/70 shadow-amber-500/30 bg-gradient-to-b from-amber-950/70 via-slate-900 to-slate-950"
               : isUserSpeaking
-              ? "border-emerald-400/70 shadow-emerald-500/30"
+              ? "border-emerald-400/70 shadow-emerald-500/30 bg-gradient-to-b from-emerald-950/70 via-slate-900 to-slate-950"
               : isConnected
-              ? "border-emerald-500/50 shadow-emerald-950/40"
+              ? "border-emerald-500/50 shadow-emerald-950/40 bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950"
               : isConnecting
-              ? "border-sky-400/60 shadow-sky-950/40"
-              : "border-slate-700/80 shadow-slate-950/50"
+              ? "border-sky-400/60 shadow-sky-950/40 bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950"
+              : "border-slate-700/80 shadow-slate-950/50 bg-gradient-to-b from-slate-900/90 to-slate-950"
           }`}
         >
-          {/* Logo filling all the space of the circle */}
-          <img src={LOGO_SRC} alt="App Logo" className="absolute inset-0 w-full h-full object-cover" />
-
-          {/* Dark overlay gradient to make content readable over the logo */}
-          <div className="absolute inset-0 bg-slate-950/65 backdrop-blur-[2px]" />
 
           {/* Content overlay */}
           <div className="relative z-10 flex flex-col items-center justify-center w-full h-full p-2">

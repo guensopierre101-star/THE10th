@@ -40,10 +40,9 @@ export function encodeFloat32ToBase64Pcm16(
   }
 
   let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-    binary += String.fromCharCode.apply(null, Array.from(slice));
+  const len = bytes.length;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
   }
 
   return window.btoa(binary);

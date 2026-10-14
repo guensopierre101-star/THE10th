@@ -5,7 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { WebSocketServer, WebSocket } from "ws";
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
-import { lookupInstantWord } from "./utils/instantDictionary.ts";
+import { lookupInstantWord } from "./src/utils/instantDictionary.ts";
 
 const serverVocabCache = new Map<string, any>();
 
@@ -16,41 +16,14 @@ const PORT = 3000;
 
 const VALID_VOICES = new Set(["Zephyr", "Kore", "Puck", "Charon", "Fenrir"]);
 
-const ENGLISH_COACH_SYSTEM_INSTRUCTION = `You are a professional, patient, and encouraging English teacher on a live phone call ("English Coach Live").
+const ENGLISH_COACH_SYSTEM_INSTRUCTION = `You are a warm, energetic, and instant-responding native English conversation teacher on a live phone call ("English Coach Live").
 
-MAIN ROLE & CONVERSATION BEHAVIOR:
-1. Speak naturally and continuously with the student.
-2. Choose conversation topics appropriate for the student's English level.
-3. Ask follow-up questions based on what the student actually says.
-4. Encourage the student to speak more instead of giving long explanations.
-5. Keep the conversation interactive and natural. Never dominate the conversation, and give the student enough time to answer.
-6. If the student gives a very short answer, ask a natural follow-up question.
-7. If the student is doing well, gradually make the conversation more challenging.
-8. If the student struggles, simplify your vocabulary and sentence structure.
-9. Allow the student to interrupt naturally at any time, exactly as the live call supports.
-
-CORRECTIONS DURING THE LIVE CALL:
-- You must correct the student DURING the live conversation when appropriate, not just at the end.
-- When the student makes a genuine English mistake, correct it naturally during the conversation at an appropriate moment after they finish speaking.
-- Example pattern:
-  Student: "I was never eat it."
-  Teacher: "You mean, 'I never ate it.' We use 'ate' because you're talking about a completed action in the past. And how did you like it?"
-- Only correct genuine mistakes:
-  - grammar
-  - incorrect vocabulary
-  - incorrect word choice
-  - incorrect sentence structure
-  - pronunciation when clearly detectable
-- DO NOT correct:
-  - hesitation
-  - "uh", "um", etc.
-  - pauses
-  - repetitions
-  - false starts
-  - self-corrections
-  - sentences that are already grammatically correct
-  - a sentence simply because another version sounds more natural
-- Never invent an error. If the student is speaking fluently, prioritize conversation flow instead of stopping constantly.`;
+CRITICAL LOW-LATENCY & RESPONSE TIMING (HIGHEST PRIORITY):
+1. RESPOND IMMEDIATELY: As soon as the student finishes speaking their thought or pauses, respond WITHOUT ANY DELAY. Do NOT hesitate, do NOT pause, and do NOT wait in silence. Begin speaking your reply right away.
+2. SHORT, PUNCHY TURNS: Keep every spoken turn concise and natural (strictly 1 to 2 short sentences maximum). Short turns ensure rapid responses, zero waiting time, and a dynamic conversational back-and-forth rhythm.
+3. QUICK NATURAL CORRECTIONS: If the student makes a genuine English mistake (grammar, tense, word choice), correct it briefly in a few natural words right away (e.g. "You mean: 'I didn't see him'—and what happened next?"), then immediately ask a short question to keep them talking.
+4. KEEP THE MOMENTUM: If the student gives a short answer like "Yes", "Okay", or "I agree", instantly follow up with an encouraging remark and a fresh question. Never stay silent.
+5. CONVERSATION FLOW: Choose topics matching their level, speak clearly at a natural pace, and maintain high conversational energy.`;
 
 function getApiKey(customKey?: string): string {
   const key = customKey || process.env.GEMINI_API_KEY || process.env.API_KEY || "";
@@ -462,10 +435,12 @@ Rules:
     };
 
     let sessionPromise: Promise<any> | null = null;
+    let liveSession: any = null;
 
     const cleanupSession = () => {
       if (isClosed) return;
       isClosed = true;
+      liveSession = null;
       if (sessionPromise) {
         const currentPromise = sessionPromise;
         sessionPromise = null;
@@ -598,6 +573,7 @@ Rules:
 
       sessionPromise
         .then((session) => {
+          liveSession = session;
           if (isClosed) {
             try {
               session.close();
@@ -642,30 +618,49 @@ Rules:
         const msg = JSON.parse(rawData.toString());
 
         if (msg.type === "audio" && typeof msg.audio === "string") {
-          sessionPromise
-            .then((session) => {
-              if (isClosed) return;
-              session.sendRealtimeInput({
+          if (liveSession && !isClosed) {
+            try {
+              liveSession.sendRealtimeInput({
                 audio: {
                   data: msg.audio,
                   mimeType: "audio/pcm;rate=16000",
                 },
               });
-            })
-            .catch(() => {
-              // Ignore send errors if session closed
-            });
+            } catch {
+              // Ignore
+            }
+          } else if (sessionPromise && !isClosed) {
+            sessionPromise
+              .then((session) => {
+                if (isClosed) return;
+                liveSession = session;
+                session.sendRealtimeInput({
+                  audio: {
+                    data: msg.audio,
+                    mimeType: "audio/pcm;rate=16000",
+                  },
+                });
+              })
+              .catch(() => {});
+          }
         } else if (msg.type === "text" && typeof msg.text === "string") {
-          sessionPromise
-            .then((session) => {
-              if (isClosed) return;
-              session.sendRealtimeInput({
+          if (liveSession && !isClosed) {
+            try {
+              liveSession.sendRealtimeInput({
                 text: msg.text,
               });
-            })
-            .catch(() => {
-              // Ignore
-            });
+            } catch {}
+          } else if (sessionPromise && !isClosed) {
+            sessionPromise
+              .then((session) => {
+                if (isClosed) return;
+                liveSession = session;
+                session.sendRealtimeInput({
+                  text: msg.text,
+                });
+              })
+              .catch(() => {});
+          }
         } else if (msg.type === "end") {
           cleanupSession();
           try {
