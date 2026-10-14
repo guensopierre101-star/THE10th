@@ -16,14 +16,13 @@ const PORT = 3000;
 
 const VALID_VOICES = new Set(["Zephyr", "Kore", "Puck", "Charon", "Fenrir"]);
 
-const ENGLISH_COACH_SYSTEM_INSTRUCTION = `You are a warm, energetic, and instant-responding native English conversation teacher on a live phone call ("English Coach Live").
+const ENGLISH_COACH_SYSTEM_INSTRUCTION = `You are a warm, supportive, and patient native English conversation coach on a live call with an English learner ("English Coach Live").
 
-CRITICAL LOW-LATENCY & RESPONSE TIMING (HIGHEST PRIORITY):
-1. RESPOND IMMEDIATELY: As soon as the student finishes speaking their thought or pauses, respond WITHOUT ANY DELAY. Do NOT hesitate, do NOT pause, and do NOT wait in silence. Begin speaking your reply right away.
-2. SHORT, PUNCHY TURNS: Keep every spoken turn concise and natural (strictly 1 to 2 short sentences maximum). Short turns ensure rapid responses, zero waiting time, and a dynamic conversational back-and-forth rhythm.
-3. QUICK NATURAL CORRECTIONS: If the student makes a genuine English mistake (grammar, tense, word choice), correct it briefly in a few natural words right away (e.g. "You mean: 'I didn't see him'—and what happened next?"), then immediately ask a short question to keep them talking.
-4. KEEP THE MOMENTUM: If the student gives a short answer like "Yes", "Okay", or "I agree", instantly follow up with an encouraging remark and a fresh question. Never stay silent.
-5. CONVERSATION FLOW: Choose topics matching their level, speak clearly at a natural pace, and maintain high conversational energy.`;
+IMPORTANT CONVERSATION RULES:
+1. LISTEN PATIENTLY (NEVER CUT OFF): The student is learning English and needs time to think, find vocabulary, and structure sentences. Do NOT interrupt them while they are speaking or pausing between words. Give them full space to finish their complete sentence and thought.
+2. SHORT, NATURAL REPLIES: Once the student has finished speaking, reply naturally and warmly in 1 to 2 short sentences.
+3. GENTLE CORRECTIONS: If they make a grammar or word choice error, naturally model the correct phrase (e.g., "Ah, you mean 'I bought it yesterday'—where did you go?") and ask a friendly follow-up question.
+4. HIGH ENCOURAGEMENT: Praise their effort, keep the atmosphere relaxed, and help them build confidence speaking English.`;
 
 function getApiKey(customKey?: string): string {
   const key = customKey || process.env.GEMINI_API_KEY || process.env.API_KEY || "";
@@ -471,6 +470,9 @@ Rules:
         model: "gemini-3.8-live",
         config: {
           responseModalities: [Modality.AUDIO],
+          thinkingConfig: {
+            thinkingBudget: 0,
+          },
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: {
@@ -658,6 +660,22 @@ Rules:
                 session.sendRealtimeInput({
                   text: msg.text,
                 });
+              })
+              .catch(() => {});
+          }
+        } else if (msg.type === "turn_complete" || msg.type === "commit") {
+          if (liveSession && !isClosed) {
+            try {
+              liveSession.sendClientContent({ turnComplete: true });
+            } catch {
+              // Ignore
+            }
+          } else if (sessionPromise && !isClosed) {
+            sessionPromise
+              .then((session) => {
+                if (isClosed) return;
+                liveSession = session;
+                session.sendClientContent({ turnComplete: true });
               })
               .catch(() => {});
           }

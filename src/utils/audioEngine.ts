@@ -16,33 +16,28 @@ export function encodeFloat32ToBase64Pcm16(
     const newLength = Math.round(inputSamples.length / ratio);
     const resampled = new Float32Array(newLength);
     for (let i = 0; i < newLength; i++) {
-      const start = Math.floor(i * ratio);
-      const end = Math.min(Math.floor((i + 1) * ratio), inputSamples.length);
-      let sum = 0;
-      let count = 0;
-      for (let j = start; j < end; j++) {
-        sum += inputSamples[j];
-        count++;
-      }
-      resampled[i] = count > 0 ? sum / count : inputSamples[Math.min(start, inputSamples.length - 1)] || 0;
+      const idx = i * ratio;
+      const indexFloor = Math.floor(idx);
+      const indexCeil = Math.min(indexFloor + 1, inputSamples.length - 1);
+      const frac = idx - indexFloor;
+      resampled[i] =
+        inputSamples[indexFloor] * (1 - frac) + inputSamples[indexCeil] * frac;
     }
     samples = resampled;
   }
 
-  const byteLength = samples.length * 2;
-  const bytes = new Uint8Array(byteLength);
-
+  const int16 = new Int16Array(samples.length);
   for (let i = 0; i < samples.length; i++) {
-    const clamped = Math.max(-1, Math.min(1, samples[i]));
-    const int16 = clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767);
-    bytes[i * 2] = int16 & 0xff;
-    bytes[i * 2 + 1] = (int16 >> 8) & 0xff;
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
   }
 
+  const bytes = new Uint8Array(int16.buffer);
+  const CHUNK_SIZE = 8192;
   let binary = "";
-  const len = bytes.length;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+    binary += String.fromCharCode.apply(null, chunk as unknown as number[]);
   }
 
   return window.btoa(binary);
@@ -50,29 +45,29 @@ export function encodeFloat32ToBase64Pcm16(
 
 export function decodeBase64Pcm16ToFloat32(base64: string): Float32Array {
   const binaryString = window.atob(base64);
-  const sampleCount = Math.floor(binaryString.length / 2);
-  const float32 = new Float32Array(sampleCount);
-
-  for (let i = 0; i < sampleCount; i++) {
-    const low = binaryString.charCodeAt(i * 2);
-    const high = binaryString.charCodeAt(i * 2 + 1);
-    let int16 = (high << 8) | low;
-    if (int16 >= 0x8000) {
-      int16 -= 0x10000;
-    }
-    float32[i] = int16 / 32768.0;
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
   }
-
+  const int16 = new Int16Array(bytes.buffer, 0, Math.floor(len / 2));
+  const float32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) {
+    float32[i] = int16[i] / 32768.0;
+  }
   return float32;
 }
 
 export function calculateRmsLevel(samples: Float32Array): number {
   if (samples.length === 0) return 0;
   let sumSquares = 0;
-  for (let i = 0; i < samples.length; i++) {
+  const step = Math.max(1, Math.floor(samples.length / 256));
+  let count = 0;
+  for (let i = 0; i < samples.length; i += step) {
     const s = samples[i];
     sumSquares += s * s;
+    count++;
   }
-  const rms = Math.sqrt(sumSquares / samples.length);
+  const rms = Math.sqrt(sumSquares / count);
   return Math.min(1, rms * 4.2);
 }

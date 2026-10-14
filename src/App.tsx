@@ -133,6 +133,19 @@ export default function App() {
   const [customApiKey, setCustomApiKey] = useState<string>(() => localStorage.getItem('gemini_api_key') || '');
   const [apiKeySavedMessage, setApiKeySavedMessage] = useState<boolean>(false);
 
+  const [talkMode, setTalkMode] = useState<'auto' | 'push_to_talk'>('auto');
+  const [isPushTalking, setIsPushTalking] = useState<boolean>(false);
+  const talkModeRef = useRef<'auto' | 'push_to_talk'>('auto');
+  const isPushTalkingRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    talkModeRef.current = talkMode;
+  }, [talkMode]);
+
+  useEffect(() => {
+    isPushTalkingRef.current = isPushTalking;
+  }, [isPushTalking]);
+
   const [activeWordDefinition, setActiveWordDefinition] = useState<QuickWordDefinition | null>(null);
   const [isWordLookupLoading, setIsWordLookupLoading] = useState<boolean>(false);
   const [wordLookupError, setWordLookupError] = useState<string | null>(null);
@@ -310,6 +323,10 @@ export default function App() {
   const isStartingCallRef = useRef<boolean>(false);
   const isMicMutedRef = useRef<boolean>(false);
 
+  const isCoachSpeakingRef = useRef<boolean>(false);
+  const wasUserSpeakingRef = useRef<boolean>(false);
+  const silenceFramesCountRef = useRef<number>(0);
+
   const inputAudioCtxRef = useRef<AudioContext | null>(null);
   const outputAudioCtxRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -347,7 +364,14 @@ export default function App() {
     return () => window.clearInterval(interval);
   }, [connectionState]);
 
+  const coachEndTimeoutRef = useRef<number | null>(null);
+
   const stopAndClearCoachAudio = useCallback(() => {
+    if (coachEndTimeoutRef.current) {
+      window.clearTimeout(coachEndTimeoutRef.current);
+      coachEndTimeoutRef.current = null;
+    }
+
     for (const source of scheduledSourcesRef.current) {
       try {
         source.onended = null;
@@ -358,6 +382,7 @@ export default function App() {
       }
     }
     scheduledSourcesRef.current.clear();
+    isCoachSpeakingRef.current = false;
 
     if (outputAudioCtxRef.current) {
       nextStartTimeRef.current = outputAudioCtxRef.current.currentTime;
@@ -394,7 +419,8 @@ export default function App() {
       } catch {
         return;
       }
-      if (float32.length === 0) return;
+      // Discard tiny dummy chunks (Gemini sends 2-byte header/padding packet at start)
+      if (float32.length < 32) return;
 
       const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
       audioBuffer.getChannelData(0).set(float32);
@@ -404,26 +430,40 @@ export default function App() {
       source.connect(outputGain);
 
       const now = ctx.currentTime;
-      if (scheduledSourcesRef.current.size === 0 || nextStartTimeRef.current < now) {
-        nextStartTimeRef.current = now;
+      // 85ms jitter buffer ensures incoming chunks queue seamlessly
+      // preventing gaps and audio stuttering ("vwa ap kole")
+      const JITTER_BUFFER = 0.085;
+      let startTime = nextStartTimeRef.current;
+      if (scheduledSourcesRef.current.size === 0 || startTime < now) {
+        startTime = now + JITTER_BUFFER;
       }
-      const startTime = Math.max(now, nextStartTimeRef.current);
       nextStartTimeRef.current = startTime + audioBuffer.duration;
 
       scheduledSourcesRef.current.add(source);
+      isCoachSpeakingRef.current = true;
       setIsCoachSpeaking(true);
+
+      if (coachEndTimeoutRef.current) {
+        window.clearTimeout(coachEndTimeoutRef.current);
+        coachEndTimeoutRef.current = null;
+      }
 
       source.onended = () => {
         scheduledSourcesRef.current.delete(source);
         if (scheduledSourcesRef.current.size === 0) {
-          if (outputAudioCtxRef.current) {
-            nextStartTimeRef.current = Math.min(
-              nextStartTimeRef.current,
-              outputAudioCtxRef.current.currentTime
-            );
+          if (coachEndTimeoutRef.current) {
+            window.clearTimeout(coachEndTimeoutRef.current);
           }
-          setIsCoachSpeaking(false);
-          setCoachLevel(0);
+          coachEndTimeoutRef.current = window.setTimeout(() => {
+            if (scheduledSourcesRef.current.size === 0) {
+              isCoachSpeakingRef.current = false;
+              if (outputAudioCtxRef.current) {
+                nextStartTimeRef.current = outputAudioCtxRef.current.currentTime;
+              }
+              setIsCoachSpeaking(false);
+              setCoachLevel(0);
+            }
+          }, 120);
         }
       };
 
@@ -471,6 +511,9 @@ export default function App() {
       }
       isCallActiveRef.current = false;
       isStartingCallRef.current = false;
+      isCoachSpeakingRef.current = false;
+      wasUserSpeakingRef.current = false;
+      silenceFramesCountRef.current = 0;
 
       if (interruptionTimeoutRef.current) {
         window.clearTimeout(interruptionTimeoutRef.current);
@@ -679,6 +722,7 @@ export default function App() {
           processor.connect(silentGain);
           silentGain.connect(inputCtx.destination);
 
+          let idleKeepaliveCounter = 0;
           processor.onaudioprocess = (audioEvent) => {
             if (
               !isCallActiveRef.current ||
@@ -693,31 +737,129 @@ export default function App() {
             const rms = calculateRmsLevel(inputSamples);
             setMicLevel(rms);
 
-            if (rms > 0.08) {
+            // 1. PUSH-TO-TALK MODE (100% control, AI never cuts off student):
+            if (talkModeRef.current === "push_to_talk") {
+              if (!isPushTalkingRef.current) {
+                return;
+              }
+              if (isCoachSpeakingRef.current) {
+                stopAndClearCoachAudio();
+              }
               setIsUserSpeaking(true);
+              const base64Audio = encodeFloat32ToBase64Pcm16(
+                inputSamples,
+                inputCtx.sampleRate,
+                16000
+              );
+              try {
+                wsRef.current.send(
+                  JSON.stringify({
+                    type: "audio",
+                    audio: base64Audio,
+                  })
+                );
+              } catch {}
+              return;
+            }
+
+            // 2. AUTO MODE (Patient listening - 1.5s silence before turn completion):
+            // Acoustic Echo Suppression while coach is speaking:
+            if (isCoachSpeakingRef.current) {
+              if (rms < 0.16) {
+                return;
+              }
+              // User deliberately spoke loudly over the coach: interrupt coach immediately
+              stopAndClearCoachAudio();
+              setWasRecentlyInterrupted(true);
+            }
+
+            // User Speaking Detection:
+            const isSpeakingNow = rms >= 0.026;
+
+            if (isSpeakingNow) {
+              setIsUserSpeaking(true);
+              wasUserSpeakingRef.current = true;
+              silenceFramesCountRef.current = 0;
+              idleKeepaliveCounter = 0;
+
               if (userSpeechTimeoutRef.current) {
                 window.clearTimeout(userSpeechTimeoutRef.current);
               }
               userSpeechTimeoutRef.current = window.setTimeout(() => {
                 setIsUserSpeaking(false);
-              }, 320);
-            }
+              }, 450);
 
-            const base64Audio = encodeFloat32ToBase64Pcm16(
-              inputSamples,
-              inputCtx.sampleRate,
-              16000
-            );
-
-            try {
-              wsRef.current.send(
-                JSON.stringify({
-                  type: "audio",
-                  audio: base64Audio,
-                })
+              const base64Audio = encodeFloat32ToBase64Pcm16(
+                inputSamples,
+                inputCtx.sampleRate,
+                16000
               );
-            } catch {
-              // Ignore
+
+              try {
+                wsRef.current.send(
+                  JSON.stringify({
+                    type: "audio",
+                    audio: base64Audio,
+                  })
+                );
+              } catch {
+                // Ignore
+              }
+            } else {
+              // Not speaking right now (breathing or natural pause)
+              if (wasUserSpeakingRef.current) {
+                silenceFramesCountRef.current += 1;
+
+                // Send 2 clean silence frames
+                if (silenceFramesCountRef.current <= 2) {
+                  const silenceSamples = new Float32Array(inputSamples.length);
+                  const base64Silence = encodeFloat32ToBase64Pcm16(
+                    silenceSamples,
+                    16000,
+                    16000
+                  );
+                  try {
+                    wsRef.current.send(
+                      JSON.stringify({
+                        type: "audio",
+                        audio: base64Silence,
+                      })
+                    );
+                  } catch {}
+                } else if (silenceFramesCountRef.current === 12) {
+                  // After ~1.5 seconds of sustained quiet (12 frames @ 128ms),
+                  // assume the student has finished their complete sentence!
+                  wasUserSpeakingRef.current = false;
+                  setIsUserSpeaking(false);
+                  try {
+                    wsRef.current.send(
+                      JSON.stringify({
+                        type: "turn_complete",
+                      })
+                    );
+                  } catch {}
+                }
+              } else {
+                // Quiet room / idle state: send keepalive silence occasionally
+                idleKeepaliveCounter++;
+                if (idleKeepaliveCounter >= 16) {
+                  idleKeepaliveCounter = 0;
+                  const silenceSamples = new Float32Array(512);
+                  const base64Silence = encodeFloat32ToBase64Pcm16(
+                    silenceSamples,
+                    16000,
+                    16000
+                  );
+                  try {
+                    wsRef.current.send(
+                      JSON.stringify({
+                        type: "audio",
+                        audio: base64Silence,
+                      })
+                    );
+                  } catch {}
+                }
+              }
             }
           };
         } else if (msg.type === "interrupted") {
@@ -846,6 +988,49 @@ export default function App() {
         text: "Hello! Please greet me warmly like a friendly English conversation partner on a phone call and ask me an easy opening question to start our chat.",
       })
     );
+  };
+
+  const handleManualTurnComplete = () => {
+    if (
+      connectionState !== "connected" ||
+      !wsRef.current ||
+      wsRef.current.readyState !== WebSocket.OPEN
+    ) {
+      return;
+    }
+    wasUserSpeakingRef.current = false;
+    setIsUserSpeaking(false);
+    try {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "turn_complete",
+        })
+      );
+    } catch {}
+  };
+
+  const handleStartPushTalking = () => {
+    if (connectionState !== "connected") return;
+    stopAndClearCoachAudio();
+    setIsPushTalking(true);
+    setIsUserSpeaking(true);
+    wasUserSpeakingRef.current = true;
+  };
+
+  const handleStopPushTalking = () => {
+    if (connectionState !== "connected") return;
+    setIsPushTalking(false);
+    setIsUserSpeaking(false);
+    wasUserSpeakingRef.current = false;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      try {
+        wsRef.current.send(
+          JSON.stringify({
+            type: "turn_complete",
+          })
+        );
+      } catch {}
+    }
   };
 
   const formatDuration = (totalSeconds: number) => {
@@ -1003,15 +1188,76 @@ export default function App() {
             voiceName={selectedVoice}
           />
 
-          {isConnected && !isCoachSpeaking && !lastCoachCaption && (
-            <button
-              type="button"
-              onClick={handlePromptCoachGreeting}
-              className="mt-2 min-h-[32px] px-3 py-1 rounded-lg bg-slate-900 border border-slate-800 hover:border-slate-700 text-[11px] font-medium text-emerald-300 flex items-center gap-1.5 transition-colors whitespace-nowrap"
-            >
-              <Hand className="w-3 h-3" />
-              <span>Ask Coach to say hello first</span>
-            </button>
+          {isConnected && (
+            <div className="mt-2 flex items-center justify-center p-1 bg-slate-900/90 border border-slate-800 rounded-full text-xs">
+              <button
+                type="button"
+                onClick={() => setTalkMode("auto")}
+                className={`px-3 py-1 rounded-full font-medium transition-colors ${
+                  talkMode === "auto"
+                    ? "bg-emerald-500/30 text-emerald-300 border border-emerald-500/40"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                🌿 Mod Natirèl (Pasyan · 1.5s)
+              </button>
+              <button
+                type="button"
+                onClick={() => setTalkMode("push_to_talk")}
+                className={`px-3 py-1 rounded-full font-medium transition-colors ${
+                  talkMode === "push_to_talk"
+                    ? "bg-amber-500/30 text-amber-300 border border-amber-500/40"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                🎙️ Pouse pou Pale (Hold to Talk)
+              </button>
+            </div>
+          )}
+
+          {isConnected && talkMode === "push_to_talk" && (
+            <div className="mt-3 flex flex-col items-center gap-1.5 w-full max-w-xs">
+              <button
+                type="button"
+                onMouseDown={handleStartPushTalking}
+                onMouseUp={handleStopPushTalking}
+                onTouchStart={handleStartPushTalking}
+                onTouchEnd={handleStopPushTalking}
+                className={`w-full py-3.5 px-4 rounded-2xl font-bold text-sm tracking-wide transition-all shadow-lg active:scale-95 select-none ${
+                  isPushTalking
+                    ? "bg-emerald-500 text-slate-950 shadow-emerald-500/40 animate-pulse ring-4 ring-emerald-400/30"
+                    : "bg-gradient-to-r from-amber-600 to-amber-500 text-slate-950 hover:brightness-110 shadow-amber-500/30"
+                }`}
+              >
+                {isPushTalking ? "🎙️ Map koute w... lage bouton an lè w fini!" : "🎙️ Peze & Kenbe pou w Pale"}
+              </button>
+              <span className="text-[10px] text-slate-400 text-center">
+                AI a pap janm koupe w pandan w ap pale!
+              </span>
+            </div>
+          )}
+
+          {isConnected && talkMode === "auto" && !isCoachSpeaking && (
+            <div className="mt-2.5 flex flex-wrap items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={handleManualTurnComplete}
+                className="min-h-[34px] px-4 py-1.5 rounded-full bg-emerald-500/20 border border-emerald-400/50 hover:bg-emerald-500/30 text-xs font-semibold text-emerald-200 flex items-center gap-1.5 transition-all shadow-[0_0_15px_rgba(52,211,153,0.25)] active:scale-95"
+                title="Klike la a kou w fin pale pou repons lan vini touswit"
+              >
+                <span>⚡ Mwen fin pale · Reponn mwen</span>
+              </button>
+              {!lastCoachCaption && (
+                <button
+                  type="button"
+                  onClick={handlePromptCoachGreeting}
+                  className="min-h-[34px] px-3.5 py-1.5 rounded-full bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs font-medium text-slate-300 flex items-center gap-1.5 transition-colors whitespace-nowrap active:scale-95"
+                >
+                  <Hand className="w-3.5 h-3.5 text-amber-300" />
+                  <span>Di bonjou anvan</span>
+                </button>
+              )}
+            </div>
           )}
 
           {showCaptions && (lastCoachCaption || lastUserCaption) && (
