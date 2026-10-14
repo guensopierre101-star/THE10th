@@ -624,6 +624,15 @@ export default function App() {
       return;
     }
 
+    if (!customApiKey.trim()) {
+      cleanupSession("idle");
+      setShowSettingsModal(true);
+      setErrorMessage(
+        "Tanpri antre pwòp Gemini API Key gratis pa w la nan Paramèt (Settings) pou w ka kòmanse apèl la."
+      );
+      return;
+    }
+
     cleanupSession("requesting_mic");
     isStartingCallRef.current = true;
     setErrorMessage(null);
@@ -1083,8 +1092,8 @@ export default function App() {
             onClick={(e) => e.preventDefault()}
             className="text-base sm:text-lg font-bold tracking-tight text-white whitespace-nowrap truncate"
           >
-            <span className="xs:hidden">English Coach</span>
-            <span className="hidden xs:inline">English Coach Live</span>
+            <span className="xs:hidden">THE10th Coach</span>
+            <span className="hidden xs:inline">THE10th Coach</span>
           </a>
 
           <div
@@ -1963,12 +1972,12 @@ export default function App() {
           <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md p-6 shadow-2xl flex flex-col">
             <div className="flex items-center justify-between pb-4 border-b border-slate-800">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-slate-800 text-slate-300 flex items-center justify-center">
+                <div className="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
                   <Settings className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="text-base font-semibold text-white">API Key Settings</h3>
-                  <p className="text-xs text-slate-400">Configure your personal Gemini API Key</p>
+                  <h3 className="text-base font-semibold text-white">Kle Pèsonèl Gemini (API Key)</h3>
+                  <p className="text-xs text-slate-400">Chak itilizatè itilize pwòp kota gratis pa yo</p>
                 </div>
               </div>
               <button
@@ -1980,26 +1989,44 @@ export default function App() {
               </button>
             </div>
 
+            <div className="mt-4 p-3.5 rounded-2xl bg-indigo-950/40 border border-indigo-500/30 space-y-2">
+              <p className="text-xs text-indigo-200 font-medium leading-relaxed">
+                Pou w ka pratike Angle san limit san w pa depanse yon goud, ou bezwen mete pwòp kle Gemini pa w. Li pran mwens pase 1 minit pou w pran l gratis!
+              </p>
+              <a
+                href="https://aistudio.google.com/apikey"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-between w-full px-3.5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white transition-colors shadow-md"
+              >
+                <span>1. Klike la a pou w pran kle gratis la sou Google</span>
+                <span>↗</span>
+              </a>
+              <p className="text-[11px] text-slate-300 leading-normal">
+                2. Konekte ak kont Google ou, klike sou bouton <strong>"Create API key"</strong>, kopye kle a epi kole l nan bwat anba a.
+              </p>
+            </div>
+
             <form onSubmit={handleSaveApiKey} className="mt-4 space-y-4">
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                  Gemini API Key
+                <label className="block text-xs font-semibold text-slate-200 mb-1.5">
+                  Kole Gemini API Key pa w la:
                 </label>
                 <input
                   type="password"
                   value={customApiKey}
                   onChange={(e) => setCustomApiKey(e.target.value)}
-                  placeholder="Paste your Gemini API key here..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                  placeholder="AIzaSy..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono"
                 />
                 <p className="mt-1.5 text-[11px] text-slate-400 leading-relaxed">
-                  Your API key is securely stored in your browser's local storage and used directly for your live conversations and lesson recaps.
+                  Kle a rete anrejistre sèlman nan navigatè w la. Pèsonn lòt moun pa ka wè l.
                 </p>
               </div>
 
               {apiKeySavedMessage && (
                 <div className="p-3 rounded-xl bg-emerald-950/50 border border-emerald-500/40 text-xs text-emerald-200 text-center font-medium">
-                  API Key saved successfully!
+                  ✓ Kle a sove avèk siksè! Ou pare pou w kòmanse apèl la.
                 </div>
               )}
 
@@ -2009,13 +2036,14 @@ export default function App() {
                   onClick={() => setShowSettingsModal(false)}
                   className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition-colors"
                 >
-                  Cancel
+                  Anile
                 </button>
                 <button
                   type="submit"
-                  className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-xs font-medium text-slate-950 transition-colors"
+                  disabled={!customApiKey.trim()}
+                  className="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-xs font-bold text-slate-950 transition-colors shadow-md"
                 >
-                  Save API Key
+                  Sove Kle a
                 </button>
               </div>
             </form>

@@ -16,7 +16,7 @@ const PORT = 3000;
 
 const VALID_VOICES = new Set(["Zephyr", "Kore", "Puck", "Charon", "Fenrir"]);
 
-const ENGLISH_COACH_SYSTEM_INSTRUCTION = `You are a warm, supportive, and patient native English conversation coach on a live call with an English learner ("English Coach Live").
+const ENGLISH_COACH_SYSTEM_INSTRUCTION = `You are a warm, supportive, and patient native English conversation coach on a live call with an English learner ("THE10th Coach").
 
 IMPORTANT CONVERSATION RULES:
 1. LISTEN PATIENTLY (NEVER CUT OFF): The student is learning English and needs time to think, find vocabulary, and structure sentences. Do NOT interrupt them while they are speaking or pausing between words. Give them full space to finish their complete sentence and thought.
@@ -25,15 +25,16 @@ IMPORTANT CONVERSATION RULES:
 4. HIGH ENCOURAGEMENT: Praise their effort, keep the atmosphere relaxed, and help them build confidence speaking English.`;
 
 function getApiKey(customKey?: string): string {
-  const key = customKey || process.env.GEMINI_API_KEY || process.env.API_KEY || "";
+  // Require each user/visitor to supply their personal Gemini API key
+  const key = customKey || "";
   return key.trim();
 }
 
 function createGeminiClient(customApiKey?: string) {
   const apiKey = getApiKey(customApiKey);
-  if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
+  if (!apiKey) {
     throw new Error(
-      "GEMINI_API_KEY is not configured. Please enter your personal API key in Settings or check environment variables."
+      "Tanpri antre pwòp Gemini API Key gratis pa w la nan Paramèt (Settings) pou w ka itilize THE10th Coach."
     );
   }
   return new GoogleGenAI({
@@ -463,6 +464,18 @@ Rules:
 
     activeCleanupFn = cleanupSession;
 
+    if (!customApiKey || !customApiKey.trim()) {
+      safeSend({
+        type: "error",
+        message: "Tanpri antre pwòp Gemini API Key gratis pa w la nan Paramèt (Settings) pou w ka kòmanse apèl la.",
+      });
+      cleanupSession();
+      try {
+        clientWs.close(1008, "API Key Required");
+      } catch {}
+      return;
+    }
+
     try {
       const ai = createGeminiClient(customApiKey);
 
@@ -717,7 +730,7 @@ Rules:
   }
 
   server.listen(PORT, "0.0.0.0", () => {
-    console.log(`English Coach Live server listening on http://0.0.0.0:${PORT}`);
+    console.log(`THE10th Coach server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
