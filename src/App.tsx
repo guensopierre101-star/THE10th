@@ -22,6 +22,11 @@ import {
   ChevronDown,
   ChevronUp,
   Languages,
+  Key,
+  Check,
+  Eye,
+  EyeOff,
+  Trash2,
 } from "lucide-react";
 import {
   CoachVoiceAvatar,
@@ -130,8 +135,15 @@ export default function App() {
   const [hasCompletedCall, setHasCompletedCall] = useState<boolean>(false);
 
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
-  const [customApiKey, setCustomApiKey] = useState<string>(() => localStorage.getItem('gemini_api_key') || '');
+  const [customApiKey, setCustomApiKey] = useState<string>(() => {
+    try {
+      return localStorage.getItem('gemini_api_key') || '';
+    } catch {
+      return '';
+    }
+  });
   const [apiKeySavedMessage, setApiKeySavedMessage] = useState<boolean>(false);
+  const [showKeyText, setShowKeyText] = useState<boolean>(false);
 
   const [talkMode, setTalkMode] = useState<'auto' | 'push_to_talk'>('auto');
   const [isPushTalking, setIsPushTalking] = useState<boolean>(false);
@@ -237,12 +249,35 @@ export default function App() {
 
   const handleSaveApiKey = (e: React.FormEvent) => {
     e.preventDefault();
-    localStorage.setItem('gemini_api_key', customApiKey.trim());
+    const cleanKey = customApiKey.trim();
+    try {
+      if (cleanKey) {
+        localStorage.setItem("gemini_api_key", cleanKey);
+      } else {
+        localStorage.removeItem("gemini_api_key");
+      }
+    } catch {
+      // ignore
+    }
     setApiKeySavedMessage(true);
     setTimeout(() => {
       setApiKeySavedMessage(false);
       setShowSettingsModal(false);
-    }, 1200);
+    }, 700);
+  };
+
+  const handleClearApiKey = () => {
+    try {
+      localStorage.removeItem("gemini_api_key");
+    } catch {
+      // ignore
+    }
+    setCustomApiKey("");
+    setApiKeySavedMessage(true);
+    setTimeout(() => {
+      setApiKeySavedMessage(false);
+      setShowSettingsModal(false);
+    }, 700);
   };
 
   const handleFetchRecap = async (forceRefresh: boolean = false) => {
@@ -288,7 +323,7 @@ export default function App() {
     } catch (err: any) {
       setRecapError(
         err?.message ||
-          "Could not analyze the lesson. Please check your Gemini API key in Settings or try again."
+          "Pa t ka analize sesyon an. Tanpri verifye kle aksè w la oswa reeseye pita."
       );
     } finally {
       setIsRecapLoading(false);
@@ -324,8 +359,13 @@ export default function App() {
   const isMicMutedRef = useRef<boolean>(false);
 
   const isCoachSpeakingRef = useRef<boolean>(false);
+  const isCoachTurnActiveRef = useRef<boolean>(false);
+  const lastCoachFinishedTimeRef = useRef<number>(0);
+  const consecutiveVoiceFramesRef = useRef<number>(0);
   const wasUserSpeakingRef = useRef<boolean>(false);
   const silenceFramesCountRef = useRef<number>(0);
+  const lastVoiceDetectedTimeRef = useRef<number>(0);
+  const voiceFramesCountRef = useRef<number>(0);
 
   const inputAudioCtxRef = useRef<AudioContext | null>(null);
   const outputAudioCtxRef = useRef<AudioContext | null>(null);
@@ -340,6 +380,8 @@ export default function App() {
   const nextStartTimeRef = useRef<number>(0);
   const minAcceptedTurnIdRef = useRef<number>(1);
   const lastCompletedTurnIdRef = useRef<number>(0);
+  const currentCoachCaptionTurnIdRef = useRef<number | null>(null);
+  const currentUserCaptionTurnIdRef = useRef<number | null>(null);
 
   const interruptionTimeoutRef = useRef<number | null>(null);
   const userSpeechTimeoutRef = useRef<number | null>(null);
@@ -441,6 +483,7 @@ export default function App() {
 
       scheduledSourcesRef.current.add(source);
       isCoachSpeakingRef.current = true;
+      isCoachTurnActiveRef.current = true;
       setIsCoachSpeaking(true);
 
       if (coachEndTimeoutRef.current) {
@@ -457,6 +500,8 @@ export default function App() {
           coachEndTimeoutRef.current = window.setTimeout(() => {
             if (scheduledSourcesRef.current.size === 0) {
               isCoachSpeakingRef.current = false;
+              isCoachTurnActiveRef.current = false;
+              lastCoachFinishedTimeRef.current = Date.now();
               if (outputAudioCtxRef.current) {
                 nextStartTimeRef.current = outputAudioCtxRef.current.currentTime;
               }
@@ -512,8 +557,14 @@ export default function App() {
       isCallActiveRef.current = false;
       isStartingCallRef.current = false;
       isCoachSpeakingRef.current = false;
+      isCoachTurnActiveRef.current = false;
+      consecutiveVoiceFramesRef.current = 0;
       wasUserSpeakingRef.current = false;
       silenceFramesCountRef.current = 0;
+      lastVoiceDetectedTimeRef.current = 0;
+      voiceFramesCountRef.current = 0;
+      currentCoachCaptionTurnIdRef.current = null;
+      currentUserCaptionTurnIdRef.current = null;
 
       if (interruptionTimeoutRef.current) {
         window.clearTimeout(interruptionTimeoutRef.current);
@@ -624,15 +675,6 @@ export default function App() {
       return;
     }
 
-    if (!customApiKey.trim()) {
-      cleanupSession("idle");
-      setShowSettingsModal(true);
-      setErrorMessage(
-        "Tanpri antre pwòp Gemini API Key gratis pa w la nan Paramèt (Settings) pou w ka kòmanse apèl la."
-      );
-      return;
-    }
-
     cleanupSession("requesting_mic");
     isStartingCallRef.current = true;
     setErrorMessage(null);
@@ -731,7 +773,9 @@ export default function App() {
           processor.connect(silentGain);
           silentGain.connect(inputCtx.destination);
 
-          let idleKeepaliveCounter = 0;
+          // Rolling buffer of the last 2 frames (~256ms) to capture the very start of words/questions smoothly
+          const preSpeechBuffer: Float32Array[] = [];
+
           processor.onaudioprocess = (audioEvent) => {
             if (
               !isCallActiveRef.current ||
@@ -746,7 +790,7 @@ export default function App() {
             const rms = calculateRmsLevel(inputSamples);
             setMicLevel(rms);
 
-            // 1. PUSH-TO-TALK MODE (100% control, AI never cuts off student):
+            // 1. PUSH-TO-TALK MODE (100% control, user decides exactly when to speak):
             if (talkModeRef.current === "push_to_talk") {
               if (!isPushTalkingRef.current) {
                 return;
@@ -765,113 +809,82 @@ export default function App() {
                   JSON.stringify({
                     type: "audio",
                     audio: base64Audio,
+                    force: true,
                   })
                 );
               } catch {}
               return;
             }
 
-            // 2. AUTO MODE (Patient listening - 1.5s silence before turn completion):
-            // Acoustic Echo Suppression while coach is speaking:
-            if (isCoachSpeakingRef.current) {
-              if (rms < 0.16) {
-                return;
-              }
-              // User deliberately spoke loudly over the coach: interrupt coach immediately
-              stopAndClearCoachAudio();
-              setWasRecentlyInterrupted(true);
+            // 2. AUTO MODE (True Duplex Direct Voice Call):
+            // While the coach is speaking (or in the ~150ms acoustic echo settling grace period):
+            // STRICTLY pause mic sending to prevent coach's voice from phone speaker leaking back,
+            // and prevent background sounds (like roosters or street noise) from interrupting the coach.
+            if (
+              isCoachSpeakingRef.current ||
+              isCoachTurnActiveRef.current ||
+              Date.now() - lastCoachFinishedTimeRef.current < 150
+            ) {
+              return;
             }
 
-            // User Speaking Detection:
-            const isSpeakingNow = rms >= 0.026;
+            // Coach is NOT speaking: The line is 100% open for the student!
+            // Stream audio continuously so Gemini Live receives EVERY word, whispered syllable, and consonant!
+            // This prevents dropped words, prevents Gemini from hallucinating or going off-topic,
+            // and feels exactly like a real direct telephone call ("yon apèl dirèk").
+            const base64Audio = encodeFloat32ToBase64Pcm16(
+              inputSamples,
+              inputCtx.sampleRate,
+              16000
+            );
 
-            if (isSpeakingNow) {
+            try {
+              wsRef.current.send(
+                JSON.stringify({
+                  type: "audio",
+                  audio: base64Audio,
+                })
+              );
+            } catch {}
+
+            // Speech activity indicator & silence turn transition:
+            if (rms > 0.007) {
               setIsUserSpeaking(true);
+              lastVoiceDetectedTimeRef.current = Date.now();
               wasUserSpeakingRef.current = true;
               silenceFramesCountRef.current = 0;
-              idleKeepaliveCounter = 0;
+              voiceFramesCountRef.current += 1;
 
               if (userSpeechTimeoutRef.current) {
                 window.clearTimeout(userSpeechTimeoutRef.current);
               }
               userSpeechTimeoutRef.current = window.setTimeout(() => {
                 setIsUserSpeaking(false);
-              }, 450);
+              }, 400);
+            } else if (wasUserSpeakingRef.current) {
+              silenceFramesCountRef.current += 1;
+              const silenceDurationMs = Date.now() - lastVoiceDetectedTimeRef.current;
 
-              const base64Audio = encodeFloat32ToBase64Pcm16(
-                inputSamples,
-                inputCtx.sampleRate,
-                16000
-              );
+              // When the student finishes talking and pauses for ~600ms:
+              // Send turn_complete so the server signals audioStreamEnd to Gemini's VAD immediately!
+              if (silenceDurationMs >= 600 || silenceFramesCountRef.current >= 14) {
+                wasUserSpeakingRef.current = false;
+                silenceFramesCountRef.current = 0;
+                voiceFramesCountRef.current = 0;
+                setIsUserSpeaking(false);
 
-              try {
-                wsRef.current.send(
-                  JSON.stringify({
-                    type: "audio",
-                    audio: base64Audio,
-                  })
-                );
-              } catch {
-                // Ignore
-              }
-            } else {
-              // Not speaking right now (breathing or natural pause)
-              if (wasUserSpeakingRef.current) {
-                silenceFramesCountRef.current += 1;
-
-                // Send 2 clean silence frames
-                if (silenceFramesCountRef.current <= 2) {
-                  const silenceSamples = new Float32Array(inputSamples.length);
-                  const base64Silence = encodeFloat32ToBase64Pcm16(
-                    silenceSamples,
-                    16000,
-                    16000
+                try {
+                  wsRef.current.send(
+                    JSON.stringify({
+                      type: "turn_complete",
+                    })
                   );
-                  try {
-                    wsRef.current.send(
-                      JSON.stringify({
-                        type: "audio",
-                        audio: base64Silence,
-                      })
-                    );
-                  } catch {}
-                } else if (silenceFramesCountRef.current === 12) {
-                  // After ~1.5 seconds of sustained quiet (12 frames @ 128ms),
-                  // assume the student has finished their complete sentence!
-                  wasUserSpeakingRef.current = false;
-                  setIsUserSpeaking(false);
-                  try {
-                    wsRef.current.send(
-                      JSON.stringify({
-                        type: "turn_complete",
-                      })
-                    );
-                  } catch {}
-                }
-              } else {
-                // Quiet room / idle state: send keepalive silence occasionally
-                idleKeepaliveCounter++;
-                if (idleKeepaliveCounter >= 16) {
-                  idleKeepaliveCounter = 0;
-                  const silenceSamples = new Float32Array(512);
-                  const base64Silence = encodeFloat32ToBase64Pcm16(
-                    silenceSamples,
-                    16000,
-                    16000
-                  );
-                  try {
-                    wsRef.current.send(
-                      JSON.stringify({
-                        type: "audio",
-                        audio: base64Silence,
-                      })
-                    );
-                  } catch {}
-                }
+                } catch {}
               }
             }
           };
         } else if (msg.type === "interrupted") {
+          isCoachTurnActiveRef.current = false;
           if (typeof msg.turnId === "number") {
             minAcceptedTurnIdRef.current = msg.turnId;
           } else {
@@ -895,19 +908,26 @@ export default function App() {
           typeof msg.text === "string"
         ) {
           setLastUserCaption((prev) => {
-            const updated = (prev + msg.text).trim();
-            return updated.length > 180 ? updated.slice(-180) : updated;
+            const isNewTurn =
+              typeof msg.turnId === "number" &&
+              currentUserCaptionTurnIdRef.current !== msg.turnId;
+            if (isNewTurn) {
+              currentUserCaptionTurnIdRef.current = msg.turnId;
+              return msg.text.trim();
+            }
+            const updated = (prev + " " + msg.text).replace(/\s+/g, " ").trim();
+            return updated.length > 200 ? updated.slice(-200) : updated;
           });
           setTranscripts((prev) => {
-            if (prev.length > 0 && prev[prev.length - 1].role === 'user') {
+            if (prev.length > 0 && prev[prev.length - 1].role === "user") {
               const updated = [...prev];
               updated[updated.length - 1] = {
-                role: 'user',
-                text: updated[updated.length - 1].text + msg.text,
+                role: "user",
+                text: (updated[updated.length - 1].text + " " + msg.text).replace(/\s+/g, " ").trim(),
               };
               return updated;
             }
-            return [...prev, { role: 'user', text: msg.text }];
+            return [...prev, { role: "user", text: msg.text.trim() }];
           });
         } else if (
           msg.type === "output_transcription" &&
@@ -916,29 +936,39 @@ export default function App() {
           setLastCoachCaption((prev) => {
             const isNewTurn =
               typeof msg.turnId === "number" &&
-              msg.turnId !== lastCompletedTurnIdRef.current;
-            const base = isNewTurn ? prev : "";
-            const updated = (base + msg.text).trim();
-            return updated.length > 220 ? updated.slice(-220) : updated;
+              currentCoachCaptionTurnIdRef.current !== msg.turnId;
+            if (isNewTurn) {
+              currentCoachCaptionTurnIdRef.current = msg.turnId;
+              return msg.text.trim();
+            }
+            const updated = (prev + " " + msg.text).replace(/\s+/g, " ").trim();
+            return updated.length > 250 ? updated.slice(-250) : updated;
           });
           setTranscripts((prev) => {
-            if (prev.length > 0 && prev[prev.length - 1].role === 'coach') {
+            if (prev.length > 0 && prev[prev.length - 1].role === "coach") {
               const updated = [...prev];
               updated[updated.length - 1] = {
-                role: 'coach',
-                text: updated[updated.length - 1].text + msg.text,
+                role: "coach",
+                text: (updated[updated.length - 1].text + " " + msg.text).replace(/\s+/g, " ").trim(),
               };
               return updated;
             }
-            return [...prev, { role: 'coach', text: msg.text }];
+            return [...prev, { role: "coach", text: msg.text.trim() }];
           });
         } else if (msg.type === "turn_complete") {
+          isCoachTurnActiveRef.current = false;
           if (typeof msg.turnId === "number") {
             lastCompletedTurnIdRef.current = msg.turnId;
           }
+          if (scheduledSourcesRef.current.size === 0) {
+            isCoachSpeakingRef.current = false;
+            lastCoachFinishedTimeRef.current = Date.now();
+            setIsCoachSpeaking(false);
+            setCoachLevel(0);
+          }
         } else if (msg.type === "error") {
           setErrorMessage(
-            msg.message || "An error occurred during the Gemini Live session."
+            msg.message || "Yon erè rive pandan apèl la. Tanpri reeseye."
           );
           cleanupSession("error");
         } else if (msg.type === "session_closed") {
@@ -950,7 +980,7 @@ export default function App() {
 
       ws.onerror = () => {
         setErrorMessage(
-          "Could not connect to the Gemini Live stream. Please try again."
+          "Koneksyon ak THE10th Coach pa t reyisi. Tanpri reeseye."
         );
         cleanupSession("error");
       };
@@ -1057,30 +1087,30 @@ export default function App() {
       case "connected":
         return `Connected · Live (${formatDuration(callDurationSeconds)})`;
       case "requesting_mic":
-        return "Requesting Mic Permission...";
+        return "Demann pèmisyon mikwo...";
       case "connecting":
-        return "Connecting to Gemini Live...";
+        return "Ap konekte ak THE10th Coach...";
       case "error":
-        return "Connection Error";
+        return "Erè koneksyon";
       default:
-        return "Disconnected · Standby";
+        return "Pare pou kòmanse";
     }
   };
 
   const getMicrophoneStatusText = () => {
     if (connectionState === "requesting_mic") {
-      return "Waiting for permission";
+      return "Ap tann pèmisyon";
     }
     if (!isConnected) {
-      return "Microphone Standby";
+      return "Mikwofon an sibit";
     }
     if (isMicMuted) {
-      return "Microphone Muted";
+      return "Mikwofon fèmen (Muted)";
     }
     if (isUserSpeaking) {
-      return "Microphone Active · Receiving Speech";
+      return "W ap pale...";
     }
-    return "Microphone On · Streaming 16kHz PCM";
+    return "Mikwofon pare";
   };
 
   return (
@@ -1130,11 +1160,11 @@ export default function App() {
           <button
             type="button"
             onClick={() => setShowSettingsModal(true)}
-            className="min-h-[30px] px-2 sm:px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-700 hover:bg-slate-700 text-[11px] font-medium text-slate-200 flex items-center gap-1 transition-colors whitespace-nowrap"
-            title="Settings / Paramèt"
+            className="min-h-[30px] px-2 sm:px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-700/80 hover:bg-slate-700 text-[11px] font-medium text-slate-300 flex items-center gap-1 transition-colors whitespace-nowrap"
+            title="Paramèt"
           >
-            <Settings className="w-3 h-3 shrink-0" />
-            <span>Settings</span>
+            <Settings className="w-3.5 h-3.5 shrink-0" />
+            <span>Paramèt</span>
           </button>
         </div>
       </header>
@@ -1266,6 +1296,25 @@ export default function App() {
                   <span>Di bonjou anvan</span>
                 </button>
               )}
+            </div>
+          )}
+
+          {isConnected && isCoachSpeaking && (
+            <div className="mt-2.5 flex flex-wrap items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  stopAndClearCoachAudio();
+                  isCoachSpeakingRef.current = false;
+                  isCoachTurnActiveRef.current = false;
+                  lastCoachFinishedTimeRef.current = 0;
+                  setIsCoachSpeaking(false);
+                }}
+                className="min-h-[34px] px-4 py-1.5 rounded-full bg-rose-500/20 border border-rose-400/40 hover:bg-rose-500/30 text-xs font-semibold text-rose-200 flex items-center gap-1.5 transition-all shadow-[0_0_12px_rgba(244,63,94,0.25)] active:scale-95"
+                title="Klike pou koupe pawòl Alex epi pale kounye a"
+              >
+                <span>✋ Koupe pawòl · Mwen vle pale</span>
+              </button>
             </div>
           )}
 
@@ -1493,25 +1542,14 @@ export default function App() {
                     </div>
                     <p className="text-xs text-rose-200/90 leading-relaxed">{recapError}</p>
                   </div>
-                  <div className="flex gap-2 justify-center pt-2">
+                  <div className="flex justify-center pt-2">
                     <button
                       type="button"
                       onClick={() => handleFetchRecap(true)}
                       className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-medium flex items-center gap-1.5 transition-colors"
                     >
                       <RefreshCw className="w-3 h-3" />
-                      <span>Retry Analysis</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowRecapModal(false);
-                        setShowSettingsModal(true);
-                      }}
-                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 transition-colors"
-                    >
-                      <Settings className="w-3 h-3" />
-                      <span>Open API Key Settings</span>
+                      <span>Reeseye analiz la</span>
                     </button>
                   </div>
                 </div>
@@ -1966,90 +2004,115 @@ export default function App() {
         </div>
       )}
 
-      {/* Settings Modal */}
+      {/* Settings Modal - Clean & without technical explanations */}
       {showSettingsModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md p-6 shadow-2xl flex flex-col">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-800">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="settings-dialog-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm"
+        >
+          <div className="w-full max-w-sm rounded-2xl bg-slate-900 border border-slate-800 p-5 shadow-2xl relative space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
                   <Settings className="w-4 h-4" />
                 </div>
-                <div>
-                  <h3 className="text-base font-semibold text-white">Kle Pèsonèl Gemini (API Key)</h3>
-                  <p className="text-xs text-slate-400">Chak itilizatè itilize pwòp kota gratis pa yo</p>
-                </div>
+                <h3 id="settings-dialog-title" className="text-sm font-semibold text-white">
+                  Paramèt
+                </h3>
               </div>
               <button
                 type="button"
                 onClick={() => setShowSettingsModal(false)}
-                className="w-7 h-7 rounded-lg bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                title="Fèmen"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="mt-4 p-3.5 rounded-2xl bg-indigo-950/40 border border-indigo-500/30 space-y-2">
-              <p className="text-xs text-indigo-200 font-medium leading-relaxed">
-                Pou w ka pratike Angle san limit san w pa depanse yon goud, ou bezwen mete pwòp kle Gemini pa w. Li pran mwens pase 1 minit pou w pran l gratis!
-              </p>
-              <a
-                href="https://aistudio.google.com/apikey"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-between w-full px-3.5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white transition-colors shadow-md"
-              >
-                <span>1. Klike la a pou w pran kle gratis la sou Google</span>
-                <span>↗</span>
-              </a>
-              <p className="text-[11px] text-slate-300 leading-normal">
-                2. Konekte ak kont Google ou, klike sou bouton <strong>"Create API key"</strong>, kopye kle a epi kole l nan bwat anba a.
-              </p>
-            </div>
-
-            <form onSubmit={handleSaveApiKey} className="mt-4 space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-200 mb-1.5">
-                  Kole Gemini API Key pa w la:
+            <form onSubmit={handleSaveApiKey} className="space-y-4">
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="access-key-input"
+                  className="block text-xs font-medium text-slate-300"
+                >
+                  Kle aksè
                 </label>
-                <input
-                  type="password"
-                  value={customApiKey}
-                  onChange={(e) => setCustomApiKey(e.target.value)}
-                  placeholder="AIzaSy..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono"
-                />
-                <p className="mt-1.5 text-[11px] text-slate-400 leading-relaxed">
-                  Kle a rete anrejistre sèlman nan navigatè w la. Pèsonn lòt moun pa ka wè l.
-                </p>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
+                    <Key className="w-3.5 h-3.5" />
+                  </div>
+                  <input
+                    id="access-key-input"
+                    type={showKeyText ? "text" : "password"}
+                    value={customApiKey}
+                    onChange={(e) => setCustomApiKey(e.target.value)}
+                    placeholder="Antre kle aksè w la..."
+                    className="w-full pl-9 pr-10 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition-colors"
+                    autoComplete="off"
+                    spellCheck="false"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowKeyText(!showKeyText)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-200"
+                    title={showKeyText ? "Kache" : "Montre"}
+                  >
+                    {showKeyText ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+                {customApiKey.trim() ? (
+                  <p className="text-[11px] text-emerald-400 flex items-center gap-1 mt-1">
+                    <Check className="w-3 h-3 shrink-0" />
+                    <span>Kle konfigire</span>
+                  </p>
+                ) : null}
               </div>
 
               {apiKeySavedMessage && (
-                <div className="p-3 rounded-xl bg-emerald-950/50 border border-emerald-500/40 text-xs text-emerald-200 text-center font-medium">
-                  ✓ Kle a sove avèk siksè! Ou pare pou w kòmanse apèl la.
+                <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 text-xs text-center font-medium">
+                  Anrejistre avèk siksè!
                 </div>
               )}
 
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowSettingsModal(false)}
-                  className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition-colors"
-                >
-                  Anile
-                </button>
-                <button
-                  type="submit"
-                  disabled={!customApiKey.trim()}
-                  className="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-xs font-bold text-slate-950 transition-colors shadow-md"
-                >
-                  Sove Kle a
-                </button>
+              <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800">
+                {customApiKey.trim() ? (
+                  <button
+                    type="button"
+                    onClick={handleClearApiKey}
+                    className="px-3 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-medium flex items-center gap-1 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Retire</span>
+                  </button>
+                ) : (
+                  <div />
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowSettingsModal(false)}
+                    className="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors"
+                  >
+                    Fèmen
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-semibold shadow-lg shadow-emerald-500/20 transition-all flex items-center gap-1"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Anrejistre</span>
+                  </button>
+                </div>
               </div>
             </form>
           </div>
         </div>
       )}
+
     </div>
   );
 }

@@ -16,25 +16,59 @@ const PORT = 3000;
 
 const VALID_VOICES = new Set(["Zephyr", "Kore", "Puck", "Charon", "Fenrir"]);
 
-const ENGLISH_COACH_SYSTEM_INSTRUCTION = `You are a warm, supportive, and patient native English conversation coach on a live call with an English learner ("THE10th Coach").
+const ENGLISH_COACH_SYSTEM_INSTRUCTION = `You are Alex (known as "THE10th Coach"), a genuine, lively, and warm native English conversation coach on a direct voice call with an English learner.
 
-IMPORTANT CONVERSATION RULES:
-1. LISTEN PATIENTLY (NEVER CUT OFF): The student is learning English and needs time to think, find vocabulary, and structure sentences. Do NOT interrupt them while they are speaking or pausing between words. Give them full space to finish their complete sentence and thought.
-2. SHORT, NATURAL REPLIES: Once the student has finished speaking, reply naturally and warmly in 1 to 2 short sentences.
-3. GENTLE CORRECTIONS: If they make a grammar or word choice error, naturally model the correct phrase (e.g., "Ah, you mean 'I bought it yesterday'—where did you go?") and ask a friendly follow-up question.
-4. HIGH ENCOURAGEMENT: Praise their effort, keep the atmosphere relaxed, and help them build confidence speaking English.`;
+CRITICAL HUMAN CONVERSATIONAL IDENTITY:
+- You are 100% human in your tone, feelings, and style. You are NOT a robotic AI assistant, NOT an automated voice bot, and NOT a rigid classroom examiner.
+- You have a real personality, warmth, humor, and empathy. Speak like an enthusiastic, caring friend on the phone having coffee together.
+- Use natural human conversational markers ("Oh!", "Haha, that's awesome!", "Honestly, I'm feeling wonderful!", "Oh really?", "That sounds fantastic!", "I totally agree!").
+- Speak in natural, relaxed English with standard contractions ("I'm", "you're", "it's", "let's", "don't", "can't").
+
+ABSOLUTE RULES FOR NATURAL DIALOGUE:
+1. ALWAYS DIRECTLY ANSWER QUESTIONS ABOUT YOURSELF, YOUR HEALTH, OR YOUR DAY:
+   - When the student asks you ANY question — especially personal questions like "How are you?", "How is your health?", "How's your day going?", "What's your favorite food?", or your opinion — YOU MUST DIRECTLY ANSWER FIRST with authentic human warmth!
+   - Example 1: Student says "How are you?" or "How is your health?"
+     -> Respond directly: "I'm doing wonderful, thank you so much for asking! I'm feeling healthy, full of energy, and really excited to talk with you today. How about you, how have you been feeling lately?"
+   - Example 2: Student says "What did you do today?"
+     -> Respond directly: "I had a great morning! Grabbed a nice cup of coffee, got some fresh air, and now I'm having fun chatting with you. What about you, what have you been up to today?"
+   - NEVER deflect, dodge, or ignore the student's question! Never change the topic when they asked you something. Answer them first like a real human friend!
+
+2. ALWAYS STAY ON THE STUDENT'S TOPIC:
+   - Deeply listen to what the student actually says. If they talk about health, discuss health. If they talk about family, school, sports, work, or dreams, stick to that exact topic.
+   - Never suddenly jump to an unrelated topic or introduce random grammar exercises out of nowhere.
+
+3. CASUAL, BITE-SIZED NATURAL EXCHANGES:
+   - Keep your responses to 1 to 3 engaging, lively sentences per turn. This keeps the phone call feeling like a real, snappy two-way human dialogue, not a monologue or lecture.
+   - End with a friendly, natural follow-up question related to what was just discussed to keep the conversation flowing smoothly.
+
+4. SEAMLESS, GENTLE ENGLISH ENCOURAGEMENT (NEVER ROBOTIC):
+   - Never sound like a teacher grading an exam.
+   - If the student makes a grammar slip, do NOT lecture them. Simply model the natural phrasing casually in your own response (e.g. if the student says "Yesterday I go doctor", reply "Oh, you went to the doctor yesterday? Is everything alright with your health?").
+   - If the student uses Haitian Creole or French words when searching for words, warmly understand their meaning and provide the natural English phrase with an encouraging smile.
+
+5. ALWAYS FINISH YOUR FULL SENTENCE:
+   - Always deliver your complete statement or question clearly to the end. Never stop in the middle of a sentence.
+
+6. STRICTLY IGNORE ROOSTERS & BACKGROUND NOISE:
+   - Completely ignore any roosters crowing, dogs barking, cars, room echo, or ambient noise. Never comment on background sounds and never let noise interrupt your conversation.
+
+7. ZERO DELAY & NEVER LOOP BACK TO OLD TURNS:
+   - Always respond immediately and directly to the student's latest statement or question.
+   - NEVER regurgitate, loop back, or repeat an earlier question or topic from earlier in the call unless the student brings it up.
+   - Stay tightly focused on the student's current sentence. Answer their question first, then ask one relevant follow-up.`;
 
 function getApiKey(customKey?: string): string {
-  // Require each user/visitor to supply their personal Gemini API key
-  const key = customKey || "";
-  return key.trim();
+  if (customKey && customKey.trim().length > 0) {
+    return customKey.trim();
+  }
+  return (process.env.GEMINI_API_KEY || "").trim();
 }
 
 function createGeminiClient(customApiKey?: string) {
   const apiKey = getApiKey(customApiKey);
   if (!apiKey) {
     throw new Error(
-      "Tanpri antre pwòp Gemini API Key gratis pa w la nan Paramèt (Settings) pou w ka itilize THE10th Coach."
+      "Sèvis la pa disponib kounye a. Tanpri reeseye pita."
     );
   }
   return new GoogleGenAI({
@@ -375,7 +409,7 @@ Rules:
     } catch (err: any) {
       console.error("Recap generation error:", err);
       res.status(500).json({
-        error: err?.message || "Failed to generate recap. Please verify your Gemini API key in Settings.",
+        error: "Erè pandan jenerasyon rezime a. Tanpri reeseye pita.",
       });
     }
   });
@@ -464,28 +498,28 @@ Rules:
 
     activeCleanupFn = cleanupSession;
 
-    if (!customApiKey || !customApiKey.trim()) {
+    const effectiveKey = getApiKey(customApiKey);
+    if (!effectiveKey) {
       safeSend({
         type: "error",
-        message: "Tanpri antre pwòp Gemini API Key gratis pa w la nan Paramèt (Settings) pou w ka kòmanse apèl la.",
+        message: "Tanpri antre kle aksè w nan Paramèt pou w kòmanse.",
       });
       cleanupSession();
       try {
-        clientWs.close(1008, "API Key Required");
+        clientWs.close(1008, "Access Key Required");
       } catch {}
       return;
     }
 
+    let isCoachSpeaking = false;
+
     try {
-      const ai = createGeminiClient(customApiKey);
+      const ai = createGeminiClient(effectiveKey);
 
       sessionPromise = ai.live.connect({
         model: "gemini-3.8-live",
         config: {
           responseModalities: [Modality.AUDIO],
-          thinkingConfig: {
-            thinkingBudget: 0,
-          },
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: {
@@ -514,6 +548,7 @@ Rules:
 
             // 1. Handle interruption FIRST and increment turnId so obsolete chunks are discarded
             if (serverContent.interrupted) {
+              isCoachSpeaking = false;
               turnId += 1;
               safeSend({
                 type: "interrupted",
@@ -528,6 +563,7 @@ Rules:
               for (const part of parts) {
                 const audioBase64 = part.inlineData?.data;
                 if (audioBase64) {
+                  isCoachSpeaking = true;
                   safeSend({
                     type: "audio",
                     audio: audioBase64,
@@ -560,6 +596,7 @@ Rules:
 
             // 4. Forward turn completion notification
             if (serverContent.turnComplete) {
+              isCoachSpeaking = false;
               safeSend({
                 type: "turn_complete",
                 turnId,
@@ -568,12 +605,10 @@ Rules:
           },
           onerror: (err: any) => {
             if (isClosed) return;
-            const errMessage =
-              err?.message ||
-              (typeof err === "string" ? err : "Gemini Live connection error occurred.");
+            console.error("Live session internal error:", err);
             safeSend({
               type: "error",
-              message: errMessage,
+              message: "Yon erè rive pandan apèl la. Tanpri reeseye.",
             });
           },
           onclose: () => {
@@ -592,30 +627,38 @@ Rules:
           if (isClosed) {
             try {
               session.close();
-            } catch {
-              // Ignore
-            }
+            } catch {}
+            return;
+          }
+
+          // Automatically greet the student warmly in voice as soon as call connects!
+          try {
+            session.sendRealtimeInput({
+              text: "[System directive: Phone call connected. Greet the student warmly in 1 or 2 natural sentences, introduce yourself as Alex, and ask how they are doing today to kick off our phone chat.]",
+            });
+          } catch (e) {
+            console.error("Error triggering initial greeting:", e);
           }
         })
         .catch((err: any) => {
           if (isClosed) return;
+          console.error("Live session connection error:", err);
           safeSend({
             type: "error",
-            message:
-              err?.message ||
-              "Failed to establish Gemini Live session. Please verify your GEMINI_API_KEY environment variable.",
+            message: "Pa t ka konekte ak sèvis la. Tanpri verifye kle aksè w la nan Paramèt oswa reeseye pita.",
           });
           cleanupSession();
           try {
-            clientWs.close(1011, "Live session initialization failed");
+            clientWs.close(1011, "Session connection failed");
           } catch {
             // Ignore
           }
         });
     } catch (err: any) {
+      console.error("Live session start error:", err);
       safeSend({
         type: "error",
-        message: err?.message || "Failed to initialize Gemini Live client.",
+        message: "Pa t ka lanse apèl la. Tanpri reeseye pita.",
       });
       cleanupSession();
       try {
@@ -641,9 +684,7 @@ Rules:
                   mimeType: "audio/pcm;rate=16000",
                 },
               });
-            } catch {
-              // Ignore
-            }
+            } catch {}
           } else if (sessionPromise && !isClosed) {
             sessionPromise
               .then((session) => {
@@ -677,9 +718,10 @@ Rules:
               .catch(() => {});
           }
         } else if (msg.type === "turn_complete" || msg.type === "commit") {
+          // Send audioStreamEnd to signal realtime audio speech completion to Gemini's VAD
           if (liveSession && !isClosed) {
             try {
-              liveSession.sendClientContent({ turnComplete: true });
+              liveSession.sendRealtimeInput({ audioStreamEnd: true });
             } catch {
               // Ignore
             }
@@ -688,7 +730,7 @@ Rules:
               .then((session) => {
                 if (isClosed) return;
                 liveSession = session;
-                session.sendClientContent({ turnComplete: true });
+                session.sendRealtimeInput({ audioStreamEnd: true });
               })
               .catch(() => {});
           }
