@@ -865,9 +865,9 @@ export default function App() {
               silenceFramesCountRef.current += 1;
               const silenceDurationMs = Date.now() - lastVoiceDetectedTimeRef.current;
 
-              // When the student finishes talking and pauses for ~600ms:
-              // Send turn_complete so the server signals audioStreamEnd to Gemini's VAD immediately!
-              if (silenceDurationMs >= 600 || silenceFramesCountRef.current >= 14) {
+              // English learners need a comfortable 1200ms pause between words/sentences so their
+              // multi-syllable words and trailing consonants are never cut off in the middle!
+              if (silenceDurationMs >= 1200) {
                 wasUserSpeakingRef.current = false;
                 silenceFramesCountRef.current = 0;
                 voiceFramesCountRef.current = 0;
@@ -1321,11 +1321,15 @@ export default function App() {
           {showCaptions && (lastCoachCaption || lastUserCaption) && (
             <div className="mt-4 w-full px-4 py-3 rounded-2xl bg-slate-900/60 border border-slate-800/70 text-xs space-y-1.5">
               {lastUserCaption && (
-                <p className="text-slate-400 truncate">
+                <p className="text-slate-400">
                   <span className="text-emerald-400 font-medium mr-1.5">
                     You:
                   </span>
-                  {lastUserCaption}
+                  <InteractiveText
+                    text={lastUserCaption}
+                    onWordClick={handleQuickWordLookup}
+                    active={isClickToTranslateActive}
+                  />
                 </p>
               )}
               {lastCoachCaption && (
@@ -1333,7 +1337,11 @@ export default function App() {
                   <span className="text-amber-300 font-medium mr-1.5">
                     Coach:
                   </span>
-                  {lastCoachCaption}
+                  <InteractiveText
+                    text={lastCoachCaption}
+                    onWordClick={handleQuickWordLookup}
+                    active={isClickToTranslateActive}
+                  />
                 </p>
               )}
             </div>

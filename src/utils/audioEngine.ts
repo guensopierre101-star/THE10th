@@ -13,22 +13,50 @@ export function encodeFloat32ToBase64Pcm16(
 
   if (inputSampleRate !== targetSampleRate && inputSampleRate > 0) {
     const ratio = inputSampleRate / targetSampleRate;
-    const newLength = Math.round(inputSamples.length / ratio);
+    const newLength = Math.max(1, Math.floor(inputSamples.length / ratio));
     const resampled = new Float32Array(newLength);
-    for (let i = 0; i < newLength; i++) {
-      const idx = i * ratio;
-      const indexFloor = Math.floor(idx);
-      const indexCeil = Math.min(indexFloor + 1, inputSamples.length - 1);
-      const frac = idx - indexFloor;
-      resampled[i] =
-        inputSamples[indexFloor] * (1 - frac) + inputSamples[indexCeil] * frac;
+
+    if (ratio > 1) {
+      // True anti-aliasing area integration for downsampling (prevents high-frequency aliasing
+      // that distorts consonants like 's', 'th', 'sh', 't', 'k', leading to misrecognized words)
+      for (let i = 0; i < newLength; i++) {
+        const start = i * ratio;
+        const end = (i + 1) * ratio;
+        const startIdx = Math.floor(start);
+        const endIdx = Math.min(Math.ceil(end), inputSamples.length);
+        let sum = 0;
+        let totalWeight = 0;
+
+        for (let j = startIdx; j < endIdx; j++) {
+          const segStart = Math.max(start, j);
+          const segEnd = Math.min(end, j + 1);
+          const weight = segEnd - segStart;
+          if (weight > 0) {
+            sum += inputSamples[j] * weight;
+            totalWeight += weight;
+          }
+        }
+        resampled[i] = totalWeight > 0 ? sum / totalWeight : 0;
+      }
+    } else {
+      // Linear interpolation for upsampling
+      for (let i = 0; i < newLength; i++) {
+        const idx = i * ratio;
+        const indexFloor = Math.floor(idx);
+        const indexCeil = Math.min(indexFloor + 1, inputSamples.length - 1);
+        const frac = idx - indexFloor;
+        resampled[i] =
+          inputSamples[indexFloor] * (1 - frac) + inputSamples[indexCeil] * frac;
+      }
     }
     samples = resampled;
   }
 
   const int16 = new Int16Array(samples.length);
   for (let i = 0; i < samples.length; i++) {
-    const s = Math.max(-1, Math.min(1, samples[i]));
+    // Gentle 1.3x consonant boost with smooth clamping so soft syllables are clearly audible to the model
+    const boosted = samples[i] * 1.3;
+    const s = Math.max(-1, Math.min(1, boosted));
     int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
   }
 
